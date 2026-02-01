@@ -163,6 +163,8 @@ Login: Username - `admin`, Password - `admin`
 
 Add Prometheus data source: `http://prometheus:9090`
 
+<img width="1536" height="1024" alt="grafana_prometheus" src="https://github.com/user-attachments/assets/61ca484d-b61f-4cbc-a9aa-21579f12a052" />
+
 ---
 
 ## Architecture 
