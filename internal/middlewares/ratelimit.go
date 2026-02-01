@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
 )
 
@@ -21,6 +22,7 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 		}
 
 		if !allowed {
+			metrics.RateLimitedCount.WithLabelValues(r.URL.Path).Inc()
 			http.Error(w, "Too many requests to resolve.", http.StatusTooManyRequests)
 		}
 
