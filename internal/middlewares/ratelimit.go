@@ -24,6 +24,7 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 		if !allowed {
 			metrics.RateLimitedCount.WithLabelValues(r.URL.Path).Inc()
 			http.Error(w, "Too many requests to resolve.", http.StatusTooManyRequests)
+			return
 		}
 
 		next.ServeHTTP(w, r)

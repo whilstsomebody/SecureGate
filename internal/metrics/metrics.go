@@ -26,10 +26,19 @@ var (
 		},
 		[]string{"path"},
 	)
+
+	AuthFailures = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "securegate_auth_failures_total",
+			Help: "Total authentication/authorization failures in SecureGate",
+		},
+		[]string{"path", "reason"},
+	)
 )
 
 func RegisterMetrics() {
 	prometheus.MustRegister(RequestCount)
 	prometheus.MustRegister(RequestDuration)
 	prometheus.MustRegister(RateLimitedCount)
+	prometheus.MustRegister(AuthFailures)
 }

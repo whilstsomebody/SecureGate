@@ -8,6 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/whilstsomebody/securegate/internal/auth"
 	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
 func AuthMiddleware(next http.Handler) http.Handler {
@@ -20,14 +21,16 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
+			metrics.AuthFailures.WithLabelValues(r.URL.Path, "missing_authorization_header").Inc()
 			http.Error(w, "Missing authorization token!", http.StatusUnauthorized)
-			return 
+			return
 		}
 
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
+			metrics.AuthFailures.WithLabelValues(r.URL.Path, "invalid_authorization_format").Inc()
 			http.Error(w, "Invalid authorization format!", http.StatusUnauthorized)
-			return 
+			return
 		}
 
 		tokenString := parts[1]
@@ -44,20 +47,28 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		})
 
 		if err != nil || !token.Valid {
+			metrics.AuthFailures.WithLabelValues(r.URL.Path, "invalid_or_expired_token").Inc()
 			http.Error(w, "Invalid or Expired token", http.StatusUnauthorized)
 			return
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
+			metrics.AuthFailures.WithLabelValues(r.URL.Path, "invalid_token_claims").Inc()
 			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
 			return
 		}
 
-		role := claims["role"].(string)
+		role, ok := claims["role"].(string)
+		if !ok || role == "" {
+			metrics.AuthFailures.WithLabelValues(r.URL.Path, "missing_role_claim").Inc()
+			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			return
+		}
 
 		if !isAuthorized(r.URL.Path, role) {
-			http.Error(w, "Access forbidden: Insufficient role permission", http.StatusUnauthorized)
+			metrics.AuthFailures.WithLabelValues(r.URL.Path, "rbac_forbidden").Inc()
+			http.Error(w, "Access forbidden: Insufficient role permission", http.StatusForbidden)
 			return
 		}
 

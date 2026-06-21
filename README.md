@@ -13,12 +13,12 @@ features like authentication, authorization, rate limiting, and monitoring.
 
 SecureGate includes the following core features:
 
-- **Reverse Proxy Routing** to multiple backend microservices  
-- **JWT Authentication** for secure API access  
-- **Role-Based Access Control (RBAC)** with USER / ADMIN protected routes  
-- **Redis-backed Rate Limiting** to prevent abuse and control traffic  
-- **Prometheus Metrics Endpoint** for monitoring request activity  
-- **Grafana Dashboard Support** for observability and performance tracking  
+- **JWT Authentication** (HMAC validation) to enforce secure API access
+- **RBAC Authorization** on route prefixes (USER / ADMIN) to prevent privilege escalation
+- **Redis-backed Rate Limiting** (per-client window) to block abusive traffic, with rate-limit breach metrics
+- **Prometheus Metrics** for request volume + latency, plus counters for rate-limit blocks and auth/RBAC failures
+- **Grafana-ready Observability Stack** via Docker Compose (dashboards/alerting can be layered on top)
+- **Reverse Proxy Routing** to multiple backend microservices
 
 ---
 
@@ -167,11 +167,9 @@ Add Prometheus data source: `http://prometheus:9090`
 
 ---
 
-## Architecture 
+## Security + Observability
 
-SecureGate is designed as a centralized **API Gateway layer** that sits between 
-clients and backend microservices. It provides security, traffic control, and 
-observability features before forwarding requests to internal services.
+SecureGate is designed as a security-first gateway: every request is authenticated, authorized, and rate-limited before being proxied to internal services. In parallel, it exports Prometheus metrics so you can detect spikes, auth failures, and rate-limit breaches and wire those signals into Grafana dashboards/alerts.
 
 ```sql
 
