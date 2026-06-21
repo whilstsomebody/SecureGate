@@ -78,16 +78,9 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 func isAuthorized(path string, userRole string) bool {
 	for routePrefix, requireRole := range auth.RouteRoleMap {
-
 		if strings.HasPrefix(path, routePrefix) {
-
-			if userRole == "ADMIN" {
-				return true
-			}
-
 			return userRole == requireRole
 		}
 	}
-
 	return false
 }
