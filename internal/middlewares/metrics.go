@@ -2,6 +2,7 @@ package middlewares
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/whilstsomebody/securegate/internal/metrics"
@@ -34,7 +35,7 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 		metrics.RequestCount.WithLabelValues(
 			r.URL.Path,
 			r.Method,
-			http.StatusText(recorder.statusCode),
+			strconv.Itoa(recorder.statusCode),
 		).Inc()
 
 		metrics.RequestDuration.WithLabelValues(r.URL.Path).Observe(duration)
