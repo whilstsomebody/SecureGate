@@ -1,206 +1,287 @@
-# SecureGate — API Gateway in Golang
+# SecureGate — API Gateway in Go
 
-SecureGate is a production-style **API Gateway** built in **Golang**, 
-designed to secure and manage microservice traffic.  
-It acts as a centralized entry point for backend services and provides key 
-features like authentication, authorization, rate limiting, and monitoring.
+SecureGate is a production-style **API Gateway** built in Go, designed to secure and manage microservice traffic. It acts as a centralized entry point that handles authentication, authorization, rate limiting, resilience, and observability — so individual services don't have to.
 
 *This project showcases real-world backend engineering and DevOps practices.*
 
 ---
 
-## Functionalities
+## Features
 
-SecureGate includes the following core features:
-
-- **JWT Authentication** (HMAC validation) to enforce secure API access
-- **RBAC Authorization** on route prefixes (USER / ADMIN) to prevent privilege escalation
-- **Redis-backed Rate Limiting** (per-client window) to block abusive traffic, with rate-limit breach metrics
-- **Prometheus Metrics** for request volume + latency, plus counters for rate-limit blocks and auth/RBAC failures
-- **Grafana-ready Observability Stack** via Docker Compose (dashboards/alerting can be layered on top)
-- **Reverse Proxy Routing** to multiple backend microservices
+| Feature | Details |
+|---|---|
+| **JWT Authentication** | HS256 validation; every token carries a `jti` claim |
+| **RBAC Authorization** | Prefix-based role enforcement (USER / ADMIN) |
+| **JWT Revocation** | Invalidate a token before expiry via Redis; `POST /auth/revoke` |
+| **Redis Rate Limiting** | Atomic Lua script; per-client IP window (configurable) |
+| **Circuit Breaker** | Per-service CLOSED → OPEN → HALF_OPEN state machine; 503 on open |
+| **X-Request-ID** | Generated or forwarded on every request; echoed in response |
+| **Structured Logging** | JSON via `log/slog`; every log line carries method, path, status, duration, request\_id |
+| **Prometheus Metrics** | Request count, latency histogram, rate-limit blocks, auth failures |
+| **Grafana Dashboards** | Pre-wired via Docker Compose |
+| **Health Endpoint** | `GET /health` probes Redis and returns JSON status |
+| **Graceful Shutdown** | SIGINT/SIGTERM handled; 10-second drain window |
+| **Panic Recovery** | Unhandled panics caught and returned as 500 |
 
 ---
 
-## Tech Stack
+## Architecture
 
-- Golang  
-- Redis  
-- Prometheus  
-- Grafana  
-- Docker Compose  
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              CLIENT                                     │
+└───────────────────────────────────┬─────────────────────────────────────┘
+                                    │ HTTP
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        SecureGate  :8080                                │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │                     Middleware Chain                             │   │
+│  │                                                                  │   │
+│  │  ┌─────────────────────┐   panic → 500                           │   │
+│  │  │  RecoveryMiddleware │                                         │   │
+│  │  └──────────┬──────────┘                                         │   │
+│  │             │                                                    │   │
+│  │  ┌──────────▼──────────┐   generate / forward X-Request-ID       │   │
+│  │  │  RequestIDMiddleware│                                         │   │
+│  │  └──────────┬──────────┘                                         │   │
+│  │             │                                                    │   │
+│  │  ┌──────────▼──────────┐   record latency + request count        │   │
+│  │  │  MetricsMiddleware   │───────────────────────────► Prometheus │   |
+│  │  └──────────┬──────────┘                                         │   │
+│  │             │                                                    │   │
+│  │  ┌──────────▼──────────┐   per-IP window via Lua script          │   │
+│  │  │ RateLimitMiddleware  │◄──────────────────────────────── Redis │   |
+│  │  └──────────┬──────────┘   429 if exceeded                       │   │
+│  │             │                                                    │   │
+│  │  ┌──────────▼──────────┐   validate JWT (HS256)                  │   │
+│  │  │   AuthMiddleware     │   check revocation set in Redis        │   │
+│  │  │                      │   RBAC prefix match                    │   │
+│  │  └──────────┬──────────┘   401 / 403 on failure                  │   │
+│  └─────────────┼────────────────────────────────────────────────────┘   │
+│                │                                                        │
+│  ┌─────────────▼────────────────────────────────────────────────────┐   │
+│  │                       ProxyHandler                               │   │
+│  │                                                                  │   │
+│  │  ┌──────────────────────────────────────────────────────────┐    │   │
+│  │  │              Circuit Breaker (per service)               │    │   │
+│  │  │CLOSED ──(5 failures)──► OPEN ──(30s cooldown)──►HALF_OPEN|    │   │
+│  │  └──────────────────────────────────────────────────────────┘    │   │
+│  │                     │ strip prefix, forward                      │   │
+│  └─────────────────────┼────────────────────────────────────────────┘   │
+└────────────────────────┼────────────────────────────────────────────────┘
+                         │
+          ┌──────────────┼──────────────┐
+          │              │              │
+          ▼              ▼              ▼
+   ┌────────────┐ ┌────────────┐ ┌────────────┐
+   │  User Svc  │ │ Admin Svc  │ │Payments Svc│
+   │  :9001     │ │  :9003     │ │  :9002     │
+   └────────────┘ └────────────┘ └────────────┘
+
+
+Public endpoints (bypass auth):
+  GET  /metrics      → Prometheus scrape
+  GET  /health       → Redis probe → {"status":"ok","redis":"ok"}
+  POST /auth/revoke  → write jti to Redis revocation set
+```
 
 ---
 
 ## Project Structure
 
-```bash
-
-securegate/
-┣ cmd/
-┃ ┣ gateway/ # Main API Gateway
-┃ ┣ userservice/ # Sample User Service
-┃ ┣ adminservice/ # Sample Admin Service
-┃ ┗ token/ # JWT Token Generator
-┣ internal/
-┃ ┣ proxy/ # Reverse proxy routing logic
-┃ ┣ middleware/ # Auth, RBAC, Rate Limiting, Metrics
-┃ ┣ ratelimit/ # Redis limiter implementation
-┃ ┗ metrics/ # Prometheus metrics definitions
-┣ configs/
-┃ ┗ prometheus.yml
-┣ docker-compose.yml
-┗ README.md
-
+```
+SecureGate/
+├── cmd/
+│   ├── gateway/          # Main API gateway (port 8080)
+│   ├── userservice/      # Sample user service (port 9001)
+│   ├── adminservice/     # Sample admin service (port 9003)
+│   ├── paymentsservice/  # Sample payments service (port 9002)
+│   └── token/            # JWT token generator CLI
+├── internal/
+│   ├── auth/             # RBAC route→role map
+│   ├── circuitbreaker/   # Thread-safe circuit breaker
+│   ├── config/           # Config struct; loads .env + env vars
+│   ├── metrics/          # Prometheus metric definitions
+│   ├── middlewares/      # Auth, rate limit, metrics, recovery, request-ID
+│   ├── proxy/            # Reverse proxy with circuit breaker integration
+│   └── ratelimit/        # Redis client, Lua rate limiter, revocation store
+├── configs/
+│   └── prometheus.yml
+├── .github/workflows/
+│   └── ci.yml            # GitHub Actions: vet → test → build
+├── docker-compose.yml    # Redis, Prometheus, Grafana
+├── Dockerfile            # Multi-stage build → minimal Alpine image
+└── Makefile
 ```
 
-## Setup and Run Instructions
+---
 
-### 1. Clone the Repository
+## Environment Variables
 
-```bash
-git clone https://github.com/yourusername/securegate.git
-cd securegate
-```
+| Variable | Default | Description |
+|---|---|---|
+| `JWT_SECRET` | *(required)* | HMAC secret for JWT signing and validation |
+| `REDIS_ADDR` | `127.0.0.1:6379` | Redis address |
+| `RATE_LIMIT_COUNT` | `5` | Max requests per window per IP |
+| `RATE_LIMIT_WINDOW_SECONDS` | `10` | Window size in seconds |
+| `USER_SERVICE_ADDR` | `http://localhost:9001` | User service base URL |
+| `ADMIN_SERVICE_ADDR` | `http://localhost:9003` | Admin service base URL |
+| `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Payments service base URL |
+| `GATEWAY_PORT` | `:8080` | Port the gateway listens on |
 
-### 2. Configure Environment Variables
+Create a `.env` file in the project root (see example below):
 
-Create a `.env` file in the project root:
-
-```bash
-JWT_SECRET=my_ultra_secure_secret_key
+```env
+JWT_SECRET=your_ultra_secure_secret_key
 REDIS_ADDR=127.0.0.1:6379
 ```
 
-### 3. Start Redis + Monitoring Stack
+---
 
-Run the observability services:
+## Setup and Run
 
-```bash
-docker compose up -d
-```
-
-This starts:
-
-- Redis
-- Prometheus
-- Grafana
-
-### 4. Run Backend Microservices
-
-Start the User Service:
+### 1. Clone
 
 ```bash
-go run cmd/userservice/main.go
+git clone https://github.com/whilstsomebody/securegate.git
+cd securegate
 ```
 
-Start the Admin Service:
+### 2. Start the observability + Redis stack
 
 ```bash
-go run cmd/adminservice/main.go
+make docker-up
+# starts Redis (6379), Prometheus (9090), Grafana (3000)
 ```
-### 5. Run SecureGate Gateway
 
-Start the API Gateway:
+### 3. Start backend microservices
 
 ```bash
-go run cmd/gateway/main.go
+go run ./cmd/userservice &
+go run ./cmd/adminservice &
+go run ./cmd/paymentsservice &
 ```
 
-Gateway runs on `http://localhost:8080`.
+### 4. Run the gateway
+
+```bash
+make run
+# or: go run ./cmd/gateway
+```
+
+Gateway is live at `http://localhost:8080`.
 
 ---
 
-## Authentication Usage
-
-a. Generate a JWT Token
+## Makefile Targets
 
 ```bash
-go run cmd/token/main.go ADMIN
-```
-Copy the token output.
-
-b. Call a Protected API Route
-
-```bash
-curl -H "Authorization: Bearer <TOKEN>" \
-http://localhost:8080/users/hello
+make run          # run the gateway
+make build        # compile to bin/gateway
+make test         # go test ./...
+make lint         # go vet ./...
+make token        # generate a USER token  (ROLE=ADMIN for admin token)
+make docker-up    # start Redis + Prometheus + Grafana
+make docker-down  # stop containers
 ```
 
 ---
 
-## Rate Limiting Test
+## Usage
 
-Send multiple requests quickly:
+### Generate a JWT token
+
+```bash
+make token              # USER token
+make token ROLE=ADMIN   # ADMIN token
+```
+
+Copy the printed token.
+
+### Call a protected route
+
+```bash
+curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/users/hello
+curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/admin/dashboard
+curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/payments/checkout
+```
+
+### Health check
+
+```bash
+curl http://localhost:8080/health
+# {"status":"ok","redis":"ok"}
+```
+
+### Revoke a token
+
+```bash
+curl -X POST http://localhost:8080/auth/revoke \
+  -H "Content-Type: application/json" \
+  -d '{"token":"<JWT>"}'
+# {"status":"revoked"}
+```
+
+The token's `jti` is stored in Redis with a TTL equal to the token's remaining lifetime. Subsequent requests with that token receive `401 Token has been revoked`.
+
+### Rate limiting
 
 ```bash
 for i in {1..10}; do
-  curl -H "Authorization: Bearer <TOKEN>" \
-  http://localhost:8080/users/hello
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -H "Authorization: Bearer <TOKEN>" \
+    http://localhost:8080/users/hello
 done
-```
-After the limit is exceeded:
-
-```bash
-429 Too Many Requests
+# 200 200 200 200 200 429 429 429 429 429
 ```
 
 ---
 
-## Monitoring and Metrics
+## Route → Role Map
 
-### Prometheus Dashboard
+| Path prefix | Required role | Backend |
+|---|---|---|
+| `/users/*` | USER | port 9001 |
+| `/admin/*` | ADMIN | port 9003 |
+| `/payments/*` | ADMIN | port 9002 |
+| `/metrics` | *(public)* | Prometheus scrape |
+| `/health` | *(public)* | Redis probe |
 
-Prometheus Metrics Endpoint: `http://localhost:8080/metrics`
+---
 
-Prometheus UI: `http://localhost:9090`
+## Monitoring
 
-### Grafana Dashboard
+| Metric | Type | Labels |
+|---|---|---|
+| `securegate_requests_total` | Counter | path, method, status |
+| `securegate_request_duration_seconds` | Histogram | path |
+| `securegate_rate_limited_total` | Counter | path |
+| `securegate_auth_failures_total` | Counter | path, reason |
 
-Open Grafana UI: `http://localhost:3000`
-
-Login: Username - `admin`, Password - `admin`
-
-Add Prometheus data source: `http://prometheus:9090`
+- Prometheus UI: `http://localhost:9090`
+- Metrics endpoint: `http://localhost:8080/metrics`
+- Grafana: `http://localhost:3000` (admin / admin → add Prometheus datasource `http://prometheus:9090`)
 
 <img width="1536" height="1024" alt="grafana_prometheus" src="https://github.com/user-attachments/assets/61ca484d-b61f-4cbc-a9aa-21579f12a052" />
 
 ---
 
-## Security + Observability
+## Docker Build
 
-SecureGate is designed as a security-first gateway: every request is authenticated, authorized, and rate-limited before being proxied to internal services. In parallel, it exports Prometheus metrics so you can detect spikes, auth failures, and rate-limit breaches and wire those signals into Grafana dashboards/alerts.
-
-```sql
-
-          Client Request
-                 |
-                 v
- +------------------------------+
- |       SecureGate Gateway     |
- |------------------------------|
- |                              |
- |     JWT Authentication       |
- |     RBAC Authorization       |
- |     Redis Rate Limiting      |
- |     Metrics Middleware       |
- +------------------------------+
-    |            |           |
-    v            v           v
-User Service Admin Service Other Services
-                 |
-                 v
-+--------------------------------+
-|    Prometheus Metrics Store    |
-+--------------------------------+
-                 |
-                 v
-+--------------------------------+
-|      Grafana Dashboard UI      |
-+--------------------------------+
-
+```bash
+docker build -t securegate .
+docker run -p 8080:8080 --env-file .env securegate
 ```
 
-## Contribution
+---
 
-Solely by me. But if you want to, open a PR. 
+## Running Tests
+
+```bash
+make test
+# or: go test ./...
+```
+
+Tests cover: circuit breaker state transitions, auth middleware (missing token, bad format, expired, forbidden role, valid, public paths), rate limit middleware (IP extraction from all proxy headers, allow/block via stub), panic recovery, proxy path rewriting, and RBAC rules. No live Redis required.
