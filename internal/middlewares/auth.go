@@ -2,6 +2,7 @@ package middlewares
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -9,12 +10,20 @@ import (
 	"github.com/whilstsomebody/securegate/internal/auth"
 	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/metrics"
+	"github.com/whilstsomebody/securegate/internal/ratelimit"
 )
+
+// publicPaths bypass authentication entirely (Prometheus scrape, health probe).
+var publicPaths = map[string]bool{
+	"/metrics": true,
+	"/health":  true,
+}
 
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := r.Header.Get(RequestIDHeader)
 
-		if r.URL.Path == "/metrics" {
+		if publicPaths[r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -34,15 +43,12 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		tokenString := parts[1]
-
-		secret := config.GetJWTSecret()
+		secret := config.Cfg.JWTSecret
 
 		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method")
+				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}
-
 			return []byte(secret), nil
 		})
 
@@ -66,8 +72,21 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Check revocation list if the token carries a JTI.
+		if jti, _ := claims["jti"].(string); jti != "" {
+			revoked, err := ratelimit.IsRevoked(jti)
+			if err != nil {
+				slog.Warn("revocation check failed, allowing request", "error", err, "request_id", requestID)
+			} else if revoked {
+				metrics.AuthFailures.WithLabelValues(r.URL.Path, "token_revoked").Inc()
+				http.Error(w, "Token has been revoked", http.StatusUnauthorized)
+				return
+			}
+		}
+
 		if !isAuthorized(r.URL.Path, role) {
 			metrics.AuthFailures.WithLabelValues(r.URL.Path, "rbac_forbidden").Inc()
+			slog.Warn("access forbidden", "path", r.URL.Path, "role", role, "request_id", requestID)
 			http.Error(w, "Access forbidden: Insufficient role permission", http.StatusForbidden)
 			return
 		}
@@ -77,9 +96,9 @@ func AuthMiddleware(next http.Handler) http.Handler {
 }
 
 func isAuthorized(path string, userRole string) bool {
-	for routePrefix, requireRole := range auth.RouteRoleMap {
+	for routePrefix, requiredRole := range auth.RouteRoleMap {
 		if strings.HasPrefix(path, routePrefix) {
-			return userRole == requireRole
+			return userRole == requiredRole
 		}
 	}
 	return false

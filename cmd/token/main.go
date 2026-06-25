@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"time"
@@ -10,7 +11,6 @@ import (
 )
 
 func main() {
-
 	config.LoadENV()
 
 	secret := config.GetJWTSecret()
@@ -23,7 +23,8 @@ func main() {
 	claims := jwt.MapClaims{
 		"user": "aman",
 		"role": role,
-		"exp": time.Now().Add(time.Hour*1).Unix(),
+		"jti":  newJTI(),
+		"exp":  time.Now().Add(time.Hour).Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -35,4 +36,10 @@ func main() {
 
 	fmt.Println("\nYour JWT Token:")
 	fmt.Println(signedToken)
+}
+
+func newJTI() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
