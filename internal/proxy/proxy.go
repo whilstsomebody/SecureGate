@@ -1,22 +1,39 @@
 package proxy
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"strings"
+	"time"
+
+	"github.com/whilstsomebody/securegate/internal/circuitbreaker"
+	"github.com/whilstsomebody/securegate/internal/config"
 )
+
+// breakers holds one circuit breaker per upstream route prefix.
+var breakers = map[string]*circuitbreaker.Breaker{
+	"/users":    circuitbreaker.New("user-service", 5, 30*time.Second),
+	"/payments": circuitbreaker.New("payments-service", 5, 30*time.Second),
+	"/admin":    circuitbreaker.New("admin-service", 5, 30*time.Second),
+}
 
 func NewProxyhandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
-		log.Println("Incoming request: ", r.Method, r.URL.Path)
+		requestID := r.Header.Get("X-Request-ID")
+		slog.Info("proxying request", "method", r.Method, "path", r.URL.Path, "request_id", requestID)
 
 		target := getTargetService(r.URL.Path)
 		if target == "" {
 			http.Error(w, "Service not Found", http.StatusNotFound)
+			return
+		}
+
+		breaker := getBreakerForPath(r.URL.Path)
+		if breaker != nil && !breaker.Allow() {
+			slog.Warn("circuit breaker open, rejecting request", "path", r.URL.Path, "request_id", requestID)
+			http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -26,40 +43,79 @@ func NewProxyhandler() http.Handler {
 			return
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(targetURL)
+		rp := httputil.NewSingleHostReverseProxy(targetURL)
+		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			slog.Error("upstream error", "path", r.URL.Path, "error", err, "request_id", requestID)
+			if breaker != nil {
+				breaker.RecordFailure()
+			}
+			http.Error(w, "Bad gateway", http.StatusBadGateway)
+		}
 
 		r.URL.Path = rewritePath(r.URL.Path)
 
-		proxy.ServeHTTP(w, r)
+		rec := &proxyRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		rp.ServeHTTP(rec, r)
+
+		if breaker != nil {
+			if rec.statusCode >= 500 {
+				breaker.RecordFailure()
+			} else {
+				breaker.RecordSuccess()
+			}
+		}
 	})
 }
 
-func serviceAddr(envKey, fallback string) string {
-	if v := os.Getenv(envKey); v != "" {
-		return v
+// proxyRecorder captures the status code so circuit breaker can react to 5xx responses.
+type proxyRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (p *proxyRecorder) WriteHeader(code int) {
+	p.statusCode = code
+	p.ResponseWriter.WriteHeader(code)
+}
+
+func getBreakerForPath(path string) *circuitbreaker.Breaker {
+	for prefix, b := range breakers {
+		if strings.HasPrefix(path, prefix) {
+			return b
+		}
 	}
-	return fallback
+	return nil
 }
 
 func getTargetService(path string) string {
+	cfg := config.Cfg
 	if strings.HasPrefix(path, "/users") {
-		return serviceAddr("USER_SERVICE_ADDR", "http://localhost:9001")
+		if cfg != nil {
+			return cfg.UserServiceAddr
+		}
+		return "http://localhost:9001"
 	}
-
 	if strings.HasPrefix(path, "/payments") {
-		return serviceAddr("PAYMENTS_SERVICE_ADDR", "http://localhost:9002")
+		if cfg != nil {
+			return cfg.PaymentsServiceAddr
+		}
+		return "http://localhost:9002"
 	}
-
 	if strings.HasPrefix(path, "/admin") {
-		return serviceAddr("ADMIN_SERVICE_ADDR", "http://localhost:9003")
+		if cfg != nil {
+			return cfg.AdminServiceAddr
+		}
+		return "http://localhost:9003"
 	}
-
 	return ""
 }
 
 func rewritePath(path string) string {
 	for _, prefix := range []string{"/users", "/payments", "/admin"} {
 		if after, ok := strings.CutPrefix(path, prefix); ok {
+			if after == "" {
+				return "/"
+			}
 			return after
 		}
 	}
