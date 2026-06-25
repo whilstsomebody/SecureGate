@@ -36,9 +36,13 @@ var (
 	)
 )
 
+// RegisterMetrics registers all metrics. Safe to call multiple times (e.g. in tests).
 func RegisterMetrics() {
-	prometheus.MustRegister(RequestCount)
-	prometheus.MustRegister(RequestDuration)
-	prometheus.MustRegister(RateLimitedCount)
-	prometheus.MustRegister(AuthFailures)
+	for _, c := range []prometheus.Collector{RequestCount, RequestDuration, RateLimitedCount, AuthFailures} {
+		if err := prometheus.Register(c); err != nil {
+			if _, alreadyRegistered := err.(prometheus.AlreadyRegisteredError); !alreadyRegistered {
+				panic(err)
+			}
+		}
+	}
 }
