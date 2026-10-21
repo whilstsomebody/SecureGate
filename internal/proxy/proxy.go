@@ -1,90 +1,122 @@
 package proxy
 
 import (
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/whilstsomebody/securegate/internal/circuitbreaker"
 	"github.com/whilstsomebody/securegate/internal/config"
 )
 
-// breakers holds one circuit breaker per upstream route prefix.
-var breakers = map[string]*circuitbreaker.Breaker{
-	"/users":    circuitbreaker.New("user-service", 5, 30*time.Second),
-	"/payments": circuitbreaker.New("payments-service", 5, 30*time.Second),
-	"/admin":    circuitbreaker.New("admin-service", 5, 30*time.Second),
-}
+func NewProxyhandler() http.Handler { return newProxyHandler(http.DefaultTransport) }
 
-func NewProxyhandler() http.Handler {
+func newProxyHandler(transport http.RoundTripper) http.Handler {
+	breakers := map[string]*circuitbreaker.Breaker{}
+	for _, prefix := range []string{"/users", "/payments", "/admin"} {
+		breakers[prefix] = circuitbreaker.New(prefix, 5, 30*time.Second)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestID := r.Header.Get("X-Request-ID")
-		slog.Info("proxying request", "method", r.Method, "path", r.URL.Path, "request_id", requestID)
-
 		target := getTargetService(r.URL.Path)
 		if target == "" {
-			http.Error(w, "Service not Found", http.StatusNotFound)
+			http.NotFound(w, r)
 			return
 		}
-
-		breaker := getBreakerForPath(r.URL.Path)
-		if breaker != nil && !breaker.Allow() {
-			slog.Warn("circuit breaker open, rejecting request", "path", r.URL.Path, "request_id", requestID)
+		targetURL, err := url.Parse(target)
+		if err != nil || targetURL.Host == "" || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
+			http.Error(w, "Invalid target URL", http.StatusInternalServerError)
+			return
+		}
+		var breaker *circuitbreaker.Breaker
+		for prefix, b := range breakers {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				breaker = b
+				break
+			}
+		}
+		finish, allowed := breaker.Acquire()
+		if !allowed {
 			http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-
-		targetURL, err := url.Parse(target)
-		if err != nil {
-			http.Error(w, "Invalid Target URL", http.StatusInternalServerError)
-			return
-		}
-
-		rp := httputil.NewSingleHostReverseProxy(targetURL)
-		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			slog.Error("upstream error", "path", r.URL.Path, "error", err, "request_id", requestID)
-			if breaker != nil {
-				breaker.RecordFailure()
+		var upstreamFailed, clientBodyFailed atomic.Bool
+		completed, gotResponse := false, false
+		defer func() {
+			outcome := circuitbreaker.Neutral
+			if r.Context().Err() == nil && !clientBodyFailed.Load() {
+				if upstreamFailed.Load() {
+					outcome = circuitbreaker.Failure
+				} else if completed && gotResponse {
+					outcome = circuitbreaker.Success
+				}
 			}
-			http.Error(w, "Bad gateway", http.StatusBadGateway)
+			finish(outcome)
+		}()
+		req := r.Clone(r.Context())
+		if req.Body != nil {
+			req.Body = &errorBody{ReadCloser: req.Body, onError: func() { clientBodyFailed.Store(true) }}
 		}
-
-		r.URL.Path = rewritePath(r.URL.Path)
-
-		rec := &proxyRecorder{ResponseWriter: w, statusCode: http.StatusOK}
-		rp.ServeHTTP(rec, r)
-
-		if breaker != nil {
-			if rec.statusCode >= 500 {
-				breaker.RecordFailure()
-			} else {
-				breaker.RecordSuccess()
-			}
+		rp := &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.Out.URL.Path = rewritePath(pr.In.URL.Path)
+				pr.SetURL(targetURL)
+				pr.Out.Host = pr.In.Host
+				pr.SetXForwarded()
+				pr.Out.Header.Del("X-Real-IP")
+				if ip, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil {
+					pr.Out.Header.Set("X-Real-IP", ip)
+				}
+			},
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				response, err := transport.RoundTrip(req)
+				if err != nil {
+					upstreamFailed.Store(true)
+					return response, err
+				}
+				gotResponse = true
+				if response.StatusCode >= 500 {
+					upstreamFailed.Store(true)
+				}
+				// Upgrade bodies must retain their io.ReadWriteCloser capability.
+				if response.StatusCode != http.StatusSwitchingProtocols {
+					response.Body = &errorBody{ReadCloser: response.Body, onError: func() { upstreamFailed.Store(true) }}
+				}
+				return response, nil
+			}),
+			ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+				if r.Context().Err() != nil {
+					return
+				}
+				slog.Error("upstream error", "path", r.URL.Path, "error", err, "request_id", r.Header.Get("X-Request-ID"))
+				http.Error(w, "Bad gateway", http.StatusBadGateway)
+			},
 		}
+		rp.ServeHTTP(w, req)
+		completed = true
 	})
 }
 
-// proxyRecorder captures the status code so circuit breaker can react to 5xx responses.
-type proxyRecorder struct {
-	http.ResponseWriter
-	statusCode int
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type errorBody struct {
+	io.ReadCloser
+	onError func()
 }
 
-func (p *proxyRecorder) WriteHeader(code int) {
-	p.statusCode = code
-	p.ResponseWriter.WriteHeader(code)
-}
-
-func getBreakerForPath(path string) *circuitbreaker.Breaker {
-	for prefix, b := range breakers {
-		if strings.HasPrefix(path, prefix) {
-			return b
-		}
+func (b *errorBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		b.onError()
 	}
-	return nil
+	return n, err
 }
 
 func getTargetService(path string) string {

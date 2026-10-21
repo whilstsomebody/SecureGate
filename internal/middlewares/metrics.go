@@ -6,38 +6,32 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 )
-
-type responseRecorder struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-func (rr *responseRecorder) WriteHeader(code int) {
-	rr.statusCode = code
-	rr.ResponseWriter.WriteHeader(code)
-}
 
 func MetricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-
-		recorder := &responseRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		path := r.URL.Path
+		route := metrics.RouteLabel(path)
+		recorder := httpio.NewRecorder(w)
+		defer func() {
+			panicValue := recover()
+			status := recorder.Status
+			if panicValue != nil && !recorder.Committed {
+				status = http.StatusInternalServerError
+			}
+			metrics.RequestCount.WithLabelValues(route, metrics.MethodLabel(r.Method), strconv.Itoa(status)).Inc()
+			metrics.RequestDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+			if panicValue != nil {
+				metrics.ResponseAborts.WithLabelValues(route).Inc()
+			}
+			slog.Info("request", "method", r.Method, "path", path, "status", status, "aborted", panicValue != nil, "duration_ms", time.Since(start).Milliseconds(), "request_id", r.Header.Get(RequestIDHeader))
+			if panicValue != nil {
+				panic(panicValue)
+			}
+		}()
 		next.ServeHTTP(recorder, r)
-
-		duration := time.Since(start).Seconds()
-		status := strconv.Itoa(recorder.statusCode)
-
-		metrics.RequestCount.WithLabelValues(r.URL.Path, r.Method, status).Inc()
-		metrics.RequestDuration.WithLabelValues(r.URL.Path).Observe(duration)
-
-		slog.Info("request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", recorder.statusCode,
-			"duration_ms", time.Since(start).Milliseconds(),
-			"request_id", r.Header.Get(RequestIDHeader),
-		)
 	})
 }

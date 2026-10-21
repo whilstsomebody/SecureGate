@@ -1,82 +1,86 @@
 package circuitbreaker
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestNewBreakerIsClosedAndAllows(t *testing.T) {
-	b := New("svc", 3, 30*time.Second)
+func admit(t *testing.T, b *Breaker) func(Outcome) {
+	t.Helper()
+	done, ok := b.Acquire()
+	if !ok {
+		t.Fatal("unexpected rejection")
+	}
+	return done
+}
+func TestThresholdAndExactlyOnce(t *testing.T) {
+	b := New("test", 3, time.Hour)
+	done := admit(t, b)
+	done(Failure)
+	done(Failure)
+	admit(t, b)(Failure)
 	if b.CurrentState() != StateClosed {
-		t.Fatalf("expected CLOSED, got %s", b.CurrentState())
+		t.Fatal("duplicate completion counted")
 	}
-	if !b.Allow() {
-		t.Error("new breaker should allow requests")
+	admit(t, b)(Failure)
+	if _, ok := b.Acquire(); ok {
+		t.Fatal("open breaker admitted request")
 	}
 }
-
-func TestBreakerOpensAfterThreshold(t *testing.T) {
-	b := New("svc", 3, 30*time.Second)
-	b.RecordFailure()
-	b.RecordFailure()
+func TestStaleCompletionDoesNotCloseOpenCircuit(t *testing.T) {
+	b := New("test", 1, time.Hour)
+	old := admit(t, b)
+	admit(t, b)(Failure)
+	old(Success)
+	if b.CurrentState() != StateOpen {
+		t.Fatal("old success closed circuit")
+	}
+}
+func TestOneHalfOpenProbeAndNeutralRelease(t *testing.T) {
+	b := New("test", 1, time.Second)
+	now := time.Now()
+	b.now = func() time.Time { return now }
+	admit(t, b)(Failure)
+	now = now.Add(time.Second)
+	var accepted atomic.Int32
+	var wg sync.WaitGroup
+	done := make(chan func(Outcome), 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if f, ok := b.Acquire(); ok {
+				accepted.Add(1)
+				done <- f
+			}
+		}()
+	}
+	wg.Wait()
+	if accepted.Load() != 1 {
+		t.Fatalf("admitted %d probes", accepted.Load())
+	}
+	(<-done)(Neutral)
+	admit(t, b)(Failure)
+	if b.CurrentState() != StateOpen {
+		t.Fatal("failed probe did not reopen")
+	}
+	now = now.Add(time.Second)
+	admit(t, b)(Success)
 	if b.CurrentState() != StateClosed {
-		t.Error("should still be CLOSED after 2 failures (threshold=3)")
-	}
-	b.RecordFailure()
-	if b.CurrentState() != StateOpen {
-		t.Errorf("expected OPEN after 3 failures, got %s", b.CurrentState())
-	}
-	if b.Allow() {
-		t.Error("OPEN breaker must reject requests")
+		t.Fatal("successful probe did not close")
 	}
 }
-
-func TestBreakerTransitionsToHalfOpenAfterCooldown(t *testing.T) {
-	b := New("svc", 1, 50*time.Millisecond)
-	b.RecordFailure()
-	if b.CurrentState() != StateOpen {
-		t.Fatal("expected OPEN")
+func TestNeutralDoesNotCountAsFailure(t *testing.T) {
+	b := New("test", 2, time.Hour)
+	for i := 0; i < 20; i++ {
+		admit(t, b)(Neutral)
 	}
-	time.Sleep(60 * time.Millisecond)
-	if !b.Allow() {
-		t.Error("should allow probe request after cooldown")
-	}
-	if b.CurrentState() != StateHalfOpen {
-		t.Errorf("expected HALF_OPEN, got %s", b.CurrentState())
-	}
-}
-
-func TestBreakerClosesOnSuccessFromHalfOpen(t *testing.T) {
-	b := New("svc", 1, 50*time.Millisecond)
-	b.RecordFailure()
-	time.Sleep(60 * time.Millisecond)
-	b.Allow() // transitions to HALF_OPEN
-	b.RecordSuccess()
+	admit(t, b)(Failure)
+	admit(t, b)(Success)
+	admit(t, b)(Failure)
 	if b.CurrentState() != StateClosed {
-		t.Errorf("expected CLOSED after success, got %s", b.CurrentState())
-	}
-	if b.failures != 0 {
-		t.Error("failure counter should reset on success")
-	}
-}
-
-func TestBreakerReopensOnFailureFromHalfOpen(t *testing.T) {
-	b := New("svc", 1, 50*time.Millisecond)
-	b.RecordFailure()
-	time.Sleep(60 * time.Millisecond)
-	b.Allow() // transitions to HALF_OPEN
-	b.RecordFailure()
-	if b.CurrentState() != StateOpen {
-		t.Errorf("expected OPEN after failure in HALF_OPEN, got %s", b.CurrentState())
-	}
-}
-
-func TestSuccessResetsFailureCounter(t *testing.T) {
-	b := New("svc", 5, 30*time.Second)
-	b.RecordFailure()
-	b.RecordFailure()
-	b.RecordSuccess()
-	if b.failures != 0 {
-		t.Errorf("expected failure counter = 0 after success, got %d", b.failures)
+		t.Fatal("neutral outcomes counted or success did not reset failures")
 	}
 }

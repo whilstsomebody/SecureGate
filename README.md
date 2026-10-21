@@ -21,7 +21,7 @@ SecureGate is a production-style **API Gateway** built in Go, designed to secure
 | **Grafana Dashboards** | Pre-wired via Docker Compose |
 | **Health Endpoint** | `GET /health` probes Redis and returns JSON status |
 | **Graceful Shutdown** | SIGINT/SIGTERM handled; 10-second drain window |
-| **Panic Recovery** | Unhandled panics caught and returned as 500 |
+| **Panic Recovery** | 500 before response commitment; interrupted responses are aborted without appending error text |
 
 ---
 
@@ -254,6 +254,11 @@ done
 | `securegate_request_duration_seconds` | Histogram | path |
 | `securegate_rate_limited_total` | Counter | path |
 | `securegate_auth_failures_total` | Counter | path, reason |
+| `securegate_response_aborts_total` | Counter | path |
+
+Metric `path` values are bounded route labels (`/users`, `/payments`, `/admin`, `/health`, `/metrics`, or `unmatched`), never raw URLs. Nonstandard methods use `OTHER`. Request counters and latency include aborted requests; `securegate_response_aborts_total` identifies incomplete responses even when 200 headers were already sent.
+
+Circuit breakers count each upstream attempt once, including truncated response bodies. Client cancellations do not mark an upstream unhealthy. Only one recovery probe is allowed at a time, and stale completions cannot close a newly opened breaker. Response middleware preserves flushing and connection upgrades.
 
 - Prometheus UI: `http://localhost:9090`
 - Metrics endpoint: `http://localhost:8080/metrics`

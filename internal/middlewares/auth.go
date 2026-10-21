@@ -30,14 +30,14 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			metrics.AuthFailures.WithLabelValues(r.URL.Path, "missing_authorization_header").Inc()
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "missing_authorization_header").Inc()
 			http.Error(w, "Missing authorization token!", http.StatusUnauthorized)
 			return
 		}
 
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			metrics.AuthFailures.WithLabelValues(r.URL.Path, "invalid_authorization_format").Inc()
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_authorization_format").Inc()
 			http.Error(w, "Invalid authorization format!", http.StatusUnauthorized)
 			return
 		}
@@ -53,21 +53,21 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		})
 
 		if err != nil || !token.Valid {
-			metrics.AuthFailures.WithLabelValues(r.URL.Path, "invalid_or_expired_token").Inc()
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_or_expired_token").Inc()
 			http.Error(w, "Invalid or Expired token", http.StatusUnauthorized)
 			return
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			metrics.AuthFailures.WithLabelValues(r.URL.Path, "invalid_token_claims").Inc()
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_token_claims").Inc()
 			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
 			return
 		}
 
 		role, ok := claims["role"].(string)
 		if !ok || role == "" {
-			metrics.AuthFailures.WithLabelValues(r.URL.Path, "missing_role_claim").Inc()
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "missing_role_claim").Inc()
 			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
 			return
 		}
@@ -77,18 +77,18 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			revoked, err := ratelimit.IsRevoked(jti)
 			if err != nil {
 				slog.Error("revocation check failed", "error", err, "request_id", requestID)
-				metrics.AuthFailures.WithLabelValues(r.URL.Path, "revocation_unavailable").Inc()
+				metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "revocation_unavailable").Inc()
 				http.Error(w, "Authentication service unavailable", http.StatusServiceUnavailable)
 				return
 			} else if revoked {
-				metrics.AuthFailures.WithLabelValues(r.URL.Path, "token_revoked").Inc()
+				metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "token_revoked").Inc()
 				http.Error(w, "Token has been revoked", http.StatusUnauthorized)
 				return
 			}
 		}
 
 		if !isAuthorized(r.URL.Path, role) {
-			metrics.AuthFailures.WithLabelValues(r.URL.Path, "rbac_forbidden").Inc()
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "rbac_forbidden").Inc()
 			slog.Warn("access forbidden", "path", r.URL.Path, "role", role, "request_id", requestID)
 			http.Error(w, "Access forbidden: Insufficient role permission", http.StatusForbidden)
 			return

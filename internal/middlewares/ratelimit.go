@@ -42,7 +42,7 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 
 		if !allowed {
 			slog.Warn("rate limit exceeded", "ip", ip, "path", r.URL.Path, "request_id", r.Header.Get(RequestIDHeader))
-			metrics.RateLimitedCount.WithLabelValues(r.URL.Path).Inc()
+			metrics.RateLimitedCount.WithLabelValues(metrics.RouteLabel(r.URL.Path)).Inc()
 			http.Error(w, "Too many requests to resolve.", http.StatusTooManyRequests)
 			return
 		}

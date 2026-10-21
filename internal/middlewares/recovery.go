@@ -1,23 +1,31 @@
 package middlewares
 
 import (
+	"github.com/whilstsomebody/securegate/internal/httpio"
 	"log/slog"
 	"net/http"
 )
 
 func RecoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recorder := httpio.NewRecorder(w)
 		defer func() {
 			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					panic(rec)
+				}
 				slog.Error("panic recovered",
 					"error", rec,
 					"method", r.Method,
 					"path", r.URL.Path,
 					"request_id", r.Header.Get(RequestIDHeader),
 				)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				if recorder.Committed {
+					panic(http.ErrAbortHandler)
+				}
+				http.Error(recorder, "Internal server error", http.StatusInternalServerError)
 			}
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(recorder, r)
 	})
 }

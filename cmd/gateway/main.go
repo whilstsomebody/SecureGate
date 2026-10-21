@@ -85,9 +85,9 @@ func newHandler() http.Handler {
 	})
 
 	// All other traffic goes through the full middleware chain.
-	secureHandler := middlewares.RecoveryMiddleware(
-		middlewares.RequestIDMiddleware(
-			middlewares.MetricsMiddleware(
+	secureHandler := middlewares.RequestIDMiddleware(
+		middlewares.MetricsMiddleware(
+			middlewares.RecoveryMiddleware(
 				middlewares.RateLimitMiddleware(
 					middlewares.AuthMiddleware(
 						proxy.NewProxyhandler(),
