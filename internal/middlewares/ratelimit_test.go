@@ -15,19 +15,21 @@ func init() {
 	config.Cfg = &config.Config{RateLimitCount: 3, RateLimitWindow: 10 * time.Second}
 }
 
-func TestClientIPFromXForwardedFor(t *testing.T) {
+func TestClientIPIgnoresUntrustedXForwardedFor(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
-	if got := clientIP(req); got != "1.2.3.4" {
-		t.Errorf("expected 1.2.3.4, got %s", got)
+	if got := clientIP(req); got != "192.0.2.10" {
+		t.Errorf("expected socket peer, got %s", got)
 	}
 }
 
-func TestClientIPFromXRealIP(t *testing.T) {
+func TestClientIPIgnoresUntrustedXRealIP(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
 	req.Header.Set("X-Real-IP", "9.10.11.12")
-	if got := clientIP(req); got != "9.10.11.12" {
-		t.Errorf("expected 9.10.11.12, got %s", got)
+	if got := clientIP(req); got != "192.0.2.10" {
+		t.Errorf("expected socket peer, got %s", got)
 	}
 }
 

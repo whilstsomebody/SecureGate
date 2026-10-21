@@ -76,7 +76,10 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		if jti, _ := claims["jti"].(string); jti != "" {
 			revoked, err := ratelimit.IsRevoked(jti)
 			if err != nil {
-				slog.Warn("revocation check failed, allowing request", "error", err, "request_id", requestID)
+				slog.Error("revocation check failed", "error", err, "request_id", requestID)
+				metrics.AuthFailures.WithLabelValues(r.URL.Path, "revocation_unavailable").Inc()
+				http.Error(w, "Authentication service unavailable", http.StatusServiceUnavailable)
+				return
 			} else if revoked {
 				metrics.AuthFailures.WithLabelValues(r.URL.Path, "token_revoked").Inc()
 				http.Error(w, "Token has been revoked", http.StatusUnauthorized)

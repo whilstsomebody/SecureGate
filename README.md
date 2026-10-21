@@ -12,7 +12,7 @@ SecureGate is a production-style **API Gateway** built in Go, designed to secure
 |---|---|
 | **JWT Authentication** | HS256 validation; every token carries a `jti` claim |
 | **RBAC Authorization** | Prefix-based role enforcement (USER / ADMIN) |
-| **JWT Revocation** | Invalidate a token before expiry via Redis; `POST /auth/revoke` |
+| **Revocation checks** | Existing Redis revocations are enforced; lookup failures return 503. Token management belongs to an external identity service. |
 | **Redis Rate Limiting** | Atomic Lua script; per-client IP window (configurable) |
 | **Circuit Breaker** | Per-service CLOSED → OPEN → HALF_OPEN state machine; 503 on open |
 | **X-Request-ID** | Generated or forwarded on every request; echoed in response |
@@ -84,7 +84,7 @@ SecureGate is a production-style **API Gateway** built in Go, designed to secure
 Public endpoints (bypass auth):
   GET  /metrics      → Prometheus scrape
   GET  /health       → Redis probe → {"status":"ok","redis":"ok"}
-  POST /auth/revoke  → write jti to Redis revocation set
+  /auth/revoke      → retired; returns 404 without reading the body
 ```
 
 ---
@@ -215,16 +215,11 @@ curl http://localhost:8080/health
 # {"status":"ok","redis":"ok"}
 ```
 
-### Revoke a token
+### Token management
 
-```bash
-curl -X POST http://localhost:8080/auth/revoke \
-  -H "Content-Type: application/json" \
-  -d '{"token":"<JWT>"}'
-# {"status":"revoked"}
-```
+The public `/auth/revoke` endpoint has been removed and returns 404. It must not be used to manage tokens. Existing revocation entries remain enforced; unavailable revocation storage returns 503. Token issuance and revocation should move to a separate identity service as the reverse-proxy core is extracted.
 
-The token's `jti` is stored in Redis with a TTL equal to the token's remaining lifetime. Subsequent requests with that token receive `401 Token has been revoked`.
+Client identity for rate limiting comes from the TCP peer. Incoming `X-Forwarded-For` and `X-Real-IP` are not trusted. Deployments behind another proxy therefore share that proxy's rate-limit allowance until explicit trusted-proxy configuration is added.
 
 ### Rate limiting
 

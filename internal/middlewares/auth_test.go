@@ -1,6 +1,10 @@
 package middlewares
 
 import (
+	"context"
+	"errors"
+	"github.com/redis/go-redis/v9"
+	"github.com/whilstsomebody/securegate/internal/ratelimit"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +25,7 @@ func TestMain(m *testing.M) {
 		RateLimitCount:  5,
 		RateLimitWindow: 10 * time.Second,
 	}
+	ratelimit.Rdb = testRevocationClient(nil)
 	metrics.RegisterMetrics()
 	os.Exit(m.Run())
 }
@@ -142,6 +147,45 @@ func TestAuthMiddlewarePublicPathsSkipAuth(t *testing.T) {
 
 		if rr.Code != http.StatusOK {
 			t.Errorf("expected public path %s to skip auth, got %d", path, rr.Code)
+		}
+	}
+}
+
+type revocationHook struct{ err error }
+
+func (h revocationHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h revocationHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h revocationHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if h.err != nil {
+			cmd.SetErr(h.err)
+			return h.err
+		}
+		cmd.(*redis.IntCmd).SetVal(0)
+		return nil
+	}
+}
+func testRevocationClient(err error) *redis.Client {
+	c := redis.NewClient(&redis.Options{Addr: "unused.invalid:6379"})
+	c.AddHook(revocationHook{err: err})
+	return c
+}
+func TestRevocationUnavailableFailsClosed(t *testing.T) {
+	original := ratelimit.Rdb
+	defer func() { ratelimit.Rdb = original }()
+	for _, client := range []*redis.Client{nil, testRevocationClient(errors.New("unavailable"))} {
+		ratelimit.Rdb = client
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/users/hello", nil)
+		req.Header.Set("Authorization", "Bearer "+makeToken("USER", false))
+		AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("unauthorized forwarding") })).ServeHTTP(rr, req)
+		if rr.Code != 503 {
+			t.Fatalf("got %d, want 503", rr.Code)
+		}
+		if client != nil {
+			client.Close()
 		}
 	}
 }

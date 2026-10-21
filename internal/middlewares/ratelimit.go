@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/whilstsomebody/securegate/internal/config"
@@ -16,12 +15,7 @@ import (
 var allowFn = ratelimit.AllowRequest
 
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.SplitN(xff, ",", 2)[0])
-	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
+	// Forwarding headers are untrusted until trusted-proxy configuration exists.
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
