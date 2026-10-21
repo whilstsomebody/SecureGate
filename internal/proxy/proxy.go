@@ -15,7 +15,9 @@ import (
 	"github.com/whilstsomebody/securegate/internal/config"
 )
 
-func NewProxyhandler() http.Handler { return newProxyHandler(http.DefaultTransport) }
+func NewProxyhandler() http.Handler {
+	return newProxyHandler(readIdleTransport(upstreamTransport, 60*time.Second))
+}
 
 func newProxyHandler(transport http.RoundTripper) http.Handler {
 	breakers := map[string]*circuitbreaker.Breaker{}

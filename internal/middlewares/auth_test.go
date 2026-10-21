@@ -3,8 +3,6 @@ package middlewares
 import (
 	"context"
 	"errors"
-	"github.com/redis/go-redis/v9"
-	"github.com/whilstsomebody/securegate/internal/ratelimit"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,8 +10,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/metrics"
+	"github.com/whilstsomebody/securegate/internal/ratelimit"
 )
 
 const testSecret = "test-secret-key"

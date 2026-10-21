@@ -1,9 +1,10 @@
 package middlewares
 
 import (
-	"github.com/whilstsomebody/securegate/internal/httpio"
 	"log/slog"
 	"net/http"
+
+	"github.com/whilstsomebody/securegate/internal/httpio"
 )
 
 func RecoveryMiddleware(next http.Handler) http.Handler {

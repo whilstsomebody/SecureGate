@@ -140,6 +140,28 @@ REDIS_ADDR=127.0.0.1:6379
 
 ---
 
+## Resource limits
+
+The current safety defaults are fixed in code; configuration tuning is a follow-up change.
+
+| Resource | Limit |
+|---|---|
+| Accepted client connections, including upgrades | 1,024 |
+| Concurrent requests, including long-lived streams | 256; excess requests receive 503 with `Retry-After: 1` |
+| Client request headers | 64 KiB; 5-second header-read timeout |
+| Entire client request read, including uploads | 30 seconds |
+| Idle HTTP keep-alive connections | 60 seconds |
+| Each downstream socket write | 30 seconds |
+| Upstream connection establishment / response headers | 5 seconds / 15 seconds |
+| Upstream connections per host | 128, with up to 32 idle connections |
+| Upstream response headers | 64 KiB |
+| Each upstream body read, including upgraded connections | 60 seconds |
+| Concurrent metric scrapes / scrape timeout | 2 / 5 seconds |
+
+Active response streams have no fixed total-duration limit, but upstream reads must continue making progress. Slow uploads exceeding 30 seconds and upstream streams silent for 60 seconds will be terminated. Shutdown drains ordinary requests for up to 10 seconds, then closes remaining connections, including upgrades.
+
+---
+
 ## Setup and Run
 
 ### 1. Clone
