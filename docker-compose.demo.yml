@@ -1,0 +1,77 @@
+services:
+
+  redis:
+    image: redis
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  userservice:
+    image: golang:1.25.6-alpine
+    working_dir: /app
+    volumes:
+      - .:/app:ro
+    command: go run ./cmd/userservice
+    expose:
+      - "9001"
+
+  adminservice:
+    image: golang:1.25.6-alpine
+    working_dir: /app
+    volumes:
+      - .:/app:ro
+    command: go run ./cmd/adminservice
+    expose:
+      - "9003"
+
+  paymentsservice:
+    image: golang:1.25.6-alpine
+    working_dir: /app
+    volumes:
+      - .:/app:ro
+    command: go run ./cmd/paymentsservice
+    expose:
+      - "9002"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:9000:9000"
+    environment:
+      - JWT_SECRET=demo-secret-key-32-bytes-minimum-length
+      - REDIS_ADDR=redis:6379
+      - USER_SERVICE_ADDR=http://userservice:9001
+      - ADMIN_SERVICE_ADDR=http://adminservice:9003
+      - PAYMENTS_SERVICE_ADDR=http://paymentsservice:9002
+      - MANAGEMENT_ADDR=0.0.0.0:9000
+    depends_on:
+      - redis
+      - userservice
+      - adminservice
+      - paymentsservice
+
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./configs/prometheus.demo.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - gateway
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./configs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./configs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./configs/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
