@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
 func TestRewritePath(t *testing.T) {
@@ -22,7 +24,11 @@ func TestRewritePath(t *testing.T) {
 		{"/users/", "/"},
 	}
 	for _, tt := range tests {
-		got := rewritePath(tt.in)
+		prefix := ""
+		if route, ok := defaultRoute(t, tt.in); ok {
+			prefix = route.Prefix
+		}
+		got := rewritePath(tt.in, prefix)
 		if got != tt.want {
 			t.Errorf("rewritePath(%q) = %q, want %q", tt.in, got, tt.want)
 		}
@@ -65,7 +71,7 @@ func TestNewHandlerBuildsStandaloneCore(t *testing.T) {
 func TestNewHandlerRejectsInvalidRoutes(t *testing.T) {
 	for _, routes := range [][]Route{
 		nil,
-		{{Prefix: "/unknown", Target: "http://example.test"}},
+		{{Prefix: "/", Target: "http://example.test"}},
 		{{Prefix: "/users", Target: "ftp://example.test"}},
 		{{Prefix: "/users", Target: "http://example.test"}, {Prefix: "/users", Target: "http://other.test"}},
 	} {
@@ -73,4 +79,19 @@ func TestNewHandlerRejectsInvalidRoutes(t *testing.T) {
 			t.Fatalf("routes %#v accepted", routes)
 		}
 	}
+}
+
+func TestNewHandlerAcceptsDynamicRoute(t *testing.T) {
+	if _, err := NewHandler([]Route{{Prefix: "/catalog/v1", Target: "http://example.test"}}, http.DefaultTransport); err != nil {
+		t.Fatalf("dynamic route rejected: %v", err)
+	}
+}
+
+func defaultRoute(t *testing.T, path string) (routing.Route, bool) {
+	t.Helper()
+	table, err := routing.NewTable([]routing.Route{{Prefix: "/users"}, {Prefix: "/admin"}, {Prefix: "/payments"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return table.Match(path)
 }

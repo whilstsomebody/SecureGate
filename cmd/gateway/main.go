@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/whilstsomebody/securegate/internal/middlewares"
 	"github.com/whilstsomebody/securegate/internal/proxy"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
+	"github.com/whilstsomebody/securegate/internal/routing"
 	"github.com/whilstsomebody/securegate/internal/version"
 )
 
@@ -65,14 +67,16 @@ func main() {
 	metrics.RegisterMetrics()
 	limits := cfg.Limits
 	proxy.ConfigureTransport(limits)
-	proxyHandler, err := newProxyHandler(cfg)
+	gatewayHandler, table, err := buildGatewayHandler(cfg, cfg.Routes)
 	if err != nil {
 		log.Fatalf("invalid proxy routes: %v", err)
 	}
+	routing.Replace(table)
+	activeHandler := newSwappableHandler(gatewayHandler)
 
 	server := &http.Server{
 		Addr:              cfg.GatewayPort,
-		Handler:           newGatewayHandler(cfg, proxyHandler),
+		Handler:           activeHandler,
 		ConnContext:       httpio.ConnectionContext,
 		ReadHeaderTimeout: limits.HeaderTimeout,
 		ReadTimeout:       limits.RequestTimeout,
@@ -108,9 +112,20 @@ func main() {
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for {
+		sig := <-signals
+		if sig != syscall.SIGHUP {
+			break
+		}
+		count, err := reloadGatewayHandler(cfg, activeHandler)
+		if err != nil {
+			slog.Error("route reload rejected", "error", err)
+			continue
+		}
+		slog.Info("routes reloaded", "count", count)
+	}
 
 	slog.Info("shutting down gracefully...")
 	ctx, cancel := context.WithTimeout(context.Background(), limits.ShutdownTimeout)
@@ -154,16 +169,68 @@ func readinessHandler(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-func newProxyHandler(cfg *config.Config) (http.Handler, error) {
-	return proxy.NewHandler([]proxy.Route{
-		{Prefix: "/users", Target: cfg.UserServiceAddr},
-		{Prefix: "/admin", Target: cfg.AdminServiceAddr},
-		{Prefix: "/payments", Target: cfg.PaymentsServiceAddr},
-	}, proxy.UpstreamTransport())
+type handlerValue struct{ handler http.Handler }
+
+type swappableHandler struct{ current atomic.Value }
+
+func newSwappableHandler(initial http.Handler) *swappableHandler {
+	h := &swappableHandler{}
+	h.Store(initial)
+	return h
+}
+
+func (h *swappableHandler) Store(next http.Handler) { h.current.Store(handlerValue{handler: next}) }
+func (h *swappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.current.Load().(handlerValue).handler.ServeHTTP(w, r)
+}
+
+func buildGatewayHandler(cfg *config.Config, routes []config.RouteConfig) (http.Handler, *routing.Table, error) {
+	if len(routes) == 0 {
+		var err error
+		routes, err = cfg.LoadRoutes()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	routingRoutes := make([]routing.Route, 0, len(routes))
+	proxyRoutes := make([]proxy.Route, 0, len(routes))
+	for _, route := range routes {
+		routingRoutes = append(routingRoutes, routing.Route{Prefix: route.Prefix, Role: route.Role})
+		proxyRoutes = append(proxyRoutes, proxy.Route{Prefix: route.Prefix, Target: route.Target, Role: route.Role})
+	}
+	table, err := routing.NewTable(routingRoutes)
+	if err != nil {
+		return nil, nil, err
+	}
+	proxyHandler, err := proxy.NewHandler(proxyRoutes, proxy.UpstreamTransport())
+	if err != nil {
+		return nil, nil, err
+	}
+	return newGatewayHandlerFor(cfg, table, proxyHandler), table, nil
+}
+
+// reloadGatewayHandler publishes a fully validated replacement only after all
+// its policy middleware and proxy state have been constructed. Requests that
+// already selected the old handler continue there without interruption.
+func reloadGatewayHandler(cfg *config.Config, active *swappableHandler) (int, error) {
+	routes, err := cfg.LoadRoutes()
+	if err != nil {
+		return 0, err
+	}
+	next, table, err := buildGatewayHandler(cfg, routes)
+	if err != nil {
+		return 0, err
+	}
+	active.Store(next)
+	routing.Replace(table)
+	if cfg != nil {
+		cfg.Routes = routes
+	}
+	return len(routes), nil
 }
 
 // newHandler is retained for package tests. Production startup builds an
-// explicit proxy core through newProxyHandler before opening listeners.
+// explicit proxy core through buildGatewayHandler before opening listeners.
 func newHandler() http.Handler {
 	cfg := config.Cfg
 	if cfg == nil {
@@ -176,16 +243,16 @@ func newHandler() http.Handler {
 			Limits:              config.DefaultLimits(),
 		}
 	}
-	proxyHandler, err := newProxyHandler(cfg)
+	handler, _, err := buildGatewayHandler(cfg, cfg.Routes)
 	if err != nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			httpio.WriteError(w, r, http.StatusInternalServerError, "INVALID_PROXY_CONFIG", "Invalid proxy configuration")
 		})
 	}
-	return newGatewayHandler(cfg, proxyHandler)
+	return handler
 }
 
-func newGatewayHandler(cfg *config.Config, proxyHandler http.Handler) http.Handler {
+func newGatewayHandlerFor(cfg *config.Config, routes *routing.Table, proxyHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 
 	// Management endpoints are never served on the public listener.
@@ -201,14 +268,16 @@ func newGatewayHandler(cfg *config.Config, proxyHandler http.Handler) http.Handl
 	// Policies are optional. Observability and recovery always wrap the core.
 	handler := proxyHandler
 	if cfg != nil && cfg.AuthEnabled {
-		handler = middlewares.AuthMiddleware(handler)
+		handler = middlewares.AuthMiddlewareFor(handler, cfg, routes)
 	}
 	if cfg != nil && cfg.RateLimitEnabled {
-		handler = middlewares.RateLimitMiddleware(handler)
+		handler = middlewares.RateLimitMiddlewareFor(handler, cfg, routes)
 	}
 	handler = middlewares.RequestIDMiddleware(
-		middlewares.MetricsMiddleware(
+		middlewares.MetricsMiddlewareFor(
 			middlewares.RecoveryMiddleware(handler),
+			cfg,
+			routes,
 		),
 	)
 	mux.Handle("/", handler)

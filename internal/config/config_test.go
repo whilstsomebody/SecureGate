@@ -81,6 +81,44 @@ func TestPolicyFreeModeDoesNotRequireJWTOrRedis(t *testing.T) {
 	}
 }
 
+func TestRoutesFileOverridesLegacyRoutesAndReloads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	write := func(contents string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"routes":[{"prefix":"/catalog/v1","target":"https://catalog.example/v1"}]}`)
+	cfg, err := fromEnvironment(func(key string) string {
+		switch key {
+		case "AUTH_ENABLED", "RATE_LIMIT_ENABLED":
+			return "false"
+		case "ROUTES_FILE":
+			return path
+		case "USER_SERVICE_ADDR":
+			return "not a URL"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Routes) != 1 || cfg.Routes[0].Prefix != "/catalog/v1" {
+		t.Fatalf("routes file was not used: %#v", cfg.Routes)
+	}
+
+	write(`{"routes":[{"prefix":"/catalog/v2","target":"https://catalog.example/v2"}]}`)
+	routes, err := cfg.LoadRoutes()
+	if err != nil || len(routes) != 1 || routes[0].Prefix != "/catalog/v2" {
+		t.Fatalf("reload routes=%#v err=%v", routes, err)
+	}
+	write(`{"routes":[{"prefix":"/catalog/v2","target":"ftp://catalog.example"}]}`)
+	if _, err := cfg.LoadRoutes(); err == nil || !strings.Contains(err.Error(), "ROUTES_FILE") {
+		t.Fatalf("invalid route file accepted: %v", err)
+	}
+}
+
 func TestValidEnvironmentOverrides(t *testing.T) {
 	env := map[string]string{
 		"JWT_SECRET": "test-secret", "JWT_ISSUER": "issuer", "JWT_AUDIENCE": "audience",
@@ -161,7 +199,7 @@ func TestCheckAndSummary(t *testing.T) {
 	if !strings.Contains(summary, "Configuration syntax and values:") {
 		t.Fatalf("unexpected summary: %s", summary)
 	}
-	if !strings.Contains(summary, "/users:") || !strings.Contains(summary, "Max Connections:") {
+	if !strings.Contains(summary, "/users ->") || !strings.Contains(summary, "Max Connections:") {
 		t.Fatalf("summary missing essential keys: %s", summary)
 	}
 }

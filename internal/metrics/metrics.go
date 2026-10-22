@@ -123,8 +123,14 @@ func RegisterMetrics() {
 // RouteLabel never includes caller-controlled suffixes or unmatched URLs.
 // Keep the path label name for compatibility; its values identify routes.
 func RouteLabel(path string) string {
-	if prefix := routing.Prefix(path); prefix != "" {
-		return prefix
+	return RouteLabelFor(routing.Current(), path)
+}
+
+// RouteLabelFor uses a captured immutable table so reloading routes cannot
+// change labels for requests already inside a handler chain.
+func RouteLabelFor(table *routing.Table, path string) string {
+	if route, ok := table.Match(path); ok {
+		return route.Prefix
 	}
 	switch path {
 	case "/health", "/metrics":

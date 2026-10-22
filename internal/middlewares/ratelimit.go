@@ -11,6 +11,7 @@ import (
 	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
+	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
 // allowFn is the rate-limit check function; can be swapped in tests.
@@ -26,12 +27,16 @@ func clientIP(r *http.Request) string {
 }
 
 func RateLimitMiddleware(next http.Handler) http.Handler {
+	return RateLimitMiddlewareFor(next, config.Cfg, routing.Current())
+}
+
+func RateLimitMiddlewareFor(next http.Handler, cfg *config.Config, routes *routing.Table) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limit := 5
 		window := 10 * time.Second
-		if config.Cfg != nil {
-			limit = config.Cfg.RateLimitCount
-			window = config.Cfg.RateLimitWindow
+		if cfg != nil {
+			limit = cfg.RateLimitCount
+			window = cfg.RateLimitWindow
 		}
 
 		ip := clientIP(r)
@@ -44,8 +49,8 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 		}
 
 		if !allowed {
-			slog.Debug("rate limit exceeded", "ip", ip, "route", metrics.RouteLabel(r.URL.Path), "request_id", r.Header.Get(RequestIDHeader))
-			metrics.RateLimitedCount.WithLabelValues(metrics.RouteLabel(r.URL.Path)).Inc()
+			slog.Debug("rate limit exceeded", "ip", ip, "route", metrics.RouteLabelFor(routes, r.URL.Path), "request_id", r.Header.Get(RequestIDHeader))
+			metrics.RateLimitedCount.WithLabelValues(metrics.RouteLabelFor(routes, r.URL.Path)).Inc()
 			retrySeconds := int(window.Seconds())
 			if retrySeconds < 1 {
 				retrySeconds = 1

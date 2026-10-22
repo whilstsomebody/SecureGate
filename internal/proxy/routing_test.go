@@ -95,9 +95,13 @@ func FuzzRewriteURLPath(f *testing.F) {
 		if err != nil {
 			return
 		}
-		path := rewritePath(u.Path)
+		prefix := ""
+		if route, ok := defaultRoute(t, u.Path); ok {
+			prefix = route.Prefix
+		}
+		path := rewritePath(u.Path, prefix)
 		originalQuery := u.RawQuery
-		rewriteURLPath(u)
+		rewriteURLPath(u, prefix)
 		decoded, err := url.PathUnescape(u.EscapedPath())
 		if err != nil || decoded != path || u.Path != path {
 			t.Fatalf("inconsistent rewrite for %q: %+v", raw, u)

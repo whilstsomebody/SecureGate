@@ -74,16 +74,16 @@ SecureGate/
 │   ├── paymentsservice/  # Sample payments service (port 9002)
 │   └── token/            # JWT token generator CLI
 ├── internal/
-│   ├── auth/             # RBAC route→role map
+│   ├── auth/             # JWT-related helpers
 │   ├── circuitbreaker/   # Thread-safe circuit breaker
-│   ├── config/           # Validated environment and resource settings
+│   ├── config/           # Validated environment, route-file, and resource settings
 │   ├── httpio/           # Connection bounds, body idle protection, standardized errors
 │   ├── logging/          # Bounded structured logging
 │   ├── metrics/          # Prometheus metric definitions
 │   ├── middlewares/      # Auth, rate limit, metrics, recovery, admission, request-ID
 │   ├── proxy/            # Reverse proxy with circuit breaker integration
 │   ├── ratelimit/        # Bounded Redis client, Lua rate limiter, revocation checks
-│   ├── routing/          # Shared route-segment matching
+│   ├── routing/          # Immutable route tables and segment matching
 │   └── version/          # Version metadata and runtime build info
 ├── configs/
 │   ├── grafana/          # Auto-provisioned datasource and overview dashboard
@@ -119,9 +119,10 @@ SecureGate/
 | `RATE_LIMIT_ENABLED` | `true` | Apply Redis-backed peer-IP rate limiting |
 | `RATE_LIMIT_COUNT` | `5` | Positive integer; max requests per window per IP |
 | `RATE_LIMIT_WINDOW_SECONDS` | `10` | Integer window size, 1–9223372036 seconds |
-| `USER_SERVICE_ADDR` | `http://localhost:9001` | User service base URL |
-| `ADMIN_SERVICE_ADDR` | `http://localhost:9003` | Admin service base URL |
-| `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Payments service base URL |
+| `ROUTES_FILE` | *(unset)* | JSON route file; when set, replaces the three legacy upstream settings and can be reloaded with `SIGHUP` |
+| `USER_SERVICE_ADDR` | `http://localhost:9001` | Legacy `/users` service base URL, used only when `ROUTES_FILE` is unset |
+| `ADMIN_SERVICE_ADDR` | `http://localhost:9003` | Legacy `/admin` service base URL, used only when `ROUTES_FILE` is unset |
+| `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Legacy `/payments` service base URL, used only when `ROUTES_FILE` is unset |
 | `ACCESS_LOG_ENABLED` | `false` | Enable per-request JSON access logs; metrics remain enabled |
 | `MANAGEMENT_ADDR` | `127.0.0.1:9000` | Separate management listener; restrict network access when overriding |
 | `GATEWAY_PORT` | `:8080` | Listen address, `host:port` or `:port` |
@@ -131,6 +132,23 @@ Configuration is validated before Redis initialization or opening the gateway li
 For proxy-only operation, set both `AUTH_ENABLED=false` and `RATE_LIMIT_ENABLED=false`. In that mode SecureGate does not require `JWT_SECRET`, does not connect to Redis, and reports readiness with `"redis":"disabled"`. Disabling only one policy keeps Redis required for the other. The default remains both policies enabled for backward compatibility.
 
 Upstreams require absolute `http://` or `https://` URLs with a hostname or IP address. Base paths and query strings are supported; embedded credentials and fragments are rejected. Explicit ports must be numeric and between 1 and 65535, including Redis and listener ports. Bracket IPv6 addresses, for example `http://[::1]:9001` and `[::]:8080`. Configuration validation checks syntax; DNS resolution and service availability are checked at runtime.
+
+### Dynamic routes and zero-downtime reload
+
+Set `ROUTES_FILE` to a JSON document containing every public route:
+
+```json
+{
+  "routes": [
+    {"prefix": "/catalog", "target": "http://catalog:8080", "role": "USER"},
+    {"prefix": "/billing/v1", "target": "http://billing:8080", "role": "ADMIN"}
+  ]
+}
+```
+
+Prefixes are decoded, segment-safe mounts: they must start with `/`, cannot be `/` or end in `/`, and cannot contain empty, `.` or `..` segments. The longest matching mount is selected, so `/catalog/admin` can safely coexist with `/catalog`. Every prefix must be unique and every target follows the upstream URL rules above. When `AUTH_ENABLED=true`, every route must specify a role.
+
+After atomically replacing the file, send the gateway `SIGHUP` (`kill -HUP <pid>`). SecureGate reads and validates the full file, builds a complete replacement handler, and swaps it only if validation succeeds. Existing requests keep the route set they started with; new requests use the new set. A failed reload is logged and leaves the active routes unchanged. Route reload changes forwarding, RBAC, rate-limit labels, access-log labels, and proxy metrics together. Listener, TLS, Redis, and timeout settings still require a restart.
 
 A missing `.env` file is allowed. An existing unreadable or malformed file stops startup (including the token CLI), even when environment variables are present. Environment variables take precedence over `.env`; errors omit configuration values to avoid disclosing secrets.
 
@@ -404,7 +422,7 @@ The gateway's outer Go `ServeMux` still applies its normal redirects for literal
 | `securegate_circuit_breaker_state` | Gauge | `route` | Circuit breaker status: `0` = CLOSED (healthy), `1` = OPEN (tripped), `2` = HALF_OPEN (probing) |
 | `securegate_build_info` | Gauge | `version`, `commit`, `go_version` | Constant gauge (1) exposing running binary build information |
 
-Metric `path` values for protected traffic are bounded route labels (`/users`, `/payments`, `/admin`, or `unmatched`), never raw URLs. Nonstandard methods use `OTHER`.
+Metric `path` values for proxied traffic are bounded configured-route labels (or `unmatched`), never raw URLs. Nonstandard methods use `OTHER`.
 
 ### Automated Grafana & Prometheus Provisioning
 
@@ -550,7 +568,7 @@ All items from the **Practical Improvements** milestone are complete:
 
 With practical improvements in place, the project will move to the larger architectural milestones:
 1. ✅ **Extract proxy core**: Reverse-proxy forwarding now accepts explicit startup route definitions and can run without JWT, RBAC, Redis, or rate limiting through proxy-only mode.
-2. **Dynamic routes & reload**: Configurable route definitions with atomic, zero-downtime reloads.
+2. ✅ **Dynamic routes & reload**: JSON route definitions, segment-safe longest-prefix routing, and validated atomic `SIGHUP` reloads that preserve in-flight requests.
 3. **Backend pools & load balancing**: Health tracking, active drain, round-robin, and least-connections routing.
 4. **Explicit trusted-proxy configuration**: Safe forwarding header evaluation for multi-tier proxy topologies.
 5. **TLS termination**: Native HTTPS termination support.

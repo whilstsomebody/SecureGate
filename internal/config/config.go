@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,7 +15,14 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/whilstsomebody/securegate/internal/routing"
 )
+
+type RouteConfig struct {
+	Prefix string `json:"prefix"`
+	Target string `json:"target"`
+	Role   string `json:"role,omitempty"`
+}
 
 type Config struct {
 	Limits              ResourceLimits
@@ -32,6 +40,8 @@ type Config struct {
 	PaymentsServiceAddr string
 	GatewayPort         string
 	ManagementAddr      string
+	RoutesFile          string
+	Routes              []RouteConfig
 }
 
 // Cfg is the global config instance loaded at startup.
@@ -85,6 +95,7 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		PaymentsServiceAddr: value("PAYMENTS_SERVICE_ADDR", "http://localhost:9002"),
 		GatewayPort:         value("GATEWAY_PORT", ":8080"),
 		ManagementAddr:      value("MANAGEMENT_ADDR", "127.0.0.1:9000"),
+		RoutesFile:          get("ROUTES_FILE"),
 	}
 	for _, feature := range []struct {
 		key    string
@@ -134,13 +145,25 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		}
 	}
 	cfg.RateLimitWindow = time.Duration(seconds) * time.Second
-	for _, setting := range []struct{ key, value string }{
-		{"USER_SERVICE_ADDR", cfg.UserServiceAddr}, {"ADMIN_SERVICE_ADDR", cfg.AdminServiceAddr}, {"PAYMENTS_SERVICE_ADDR", cfg.PaymentsServiceAddr},
-	} {
-		if !validUpstream(setting.value) {
-			return nil, fmt.Errorf("%s: must be an absolute HTTP(S) URL with a valid host and port, without credentials or fragment", setting.key)
+	// Preserve precise diagnostics for the legacy environment-based route
+	// settings. When ROUTES_FILE is configured it is the complete route source,
+	// so these values are intentionally ignored.
+	if cfg.RoutesFile == "" {
+		for _, setting := range []struct{ key, value string }{
+			{"USER_SERVICE_ADDR", cfg.UserServiceAddr},
+			{"ADMIN_SERVICE_ADDR", cfg.AdminServiceAddr},
+			{"PAYMENTS_SERVICE_ADDR", cfg.PaymentsServiceAddr},
+		} {
+			if !validUpstream(setting.value) {
+				return nil, fmt.Errorf("%s: must be an absolute HTTP(S) URL without credentials or fragment", setting.key)
+			}
 		}
 	}
+	routes, err := loadRoutes(cfg.RoutesFile, defaultRoutes(cfg), cfg.AuthEnabled)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Routes = routes
 	if cfg.RequiresRedis() && !validAddress(cfg.RedisAddr, false) {
 		return nil, errors.New("REDIS_ADDR: must be host:port with port between 1 and 65535")
 	}
@@ -151,6 +174,68 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		return nil, errors.New("MANAGEMENT_ADDR: must be host:port with port between 1 and 65535")
 	}
 	return cfg, nil
+}
+
+func defaultRoutes(cfg *Config) []RouteConfig {
+	userAddr := "http://localhost:9001"
+	adminAddr := "http://localhost:9003"
+	paymentsAddr := "http://localhost:9002"
+	if cfg != nil {
+		if cfg.UserServiceAddr != "" {
+			userAddr = cfg.UserServiceAddr
+		}
+		if cfg.AdminServiceAddr != "" {
+			adminAddr = cfg.AdminServiceAddr
+		}
+		if cfg.PaymentsServiceAddr != "" {
+			paymentsAddr = cfg.PaymentsServiceAddr
+		}
+	}
+	return []RouteConfig{
+		{Prefix: "/users", Target: userAddr, Role: "USER"},
+		{Prefix: "/admin", Target: adminAddr, Role: "ADMIN"},
+		{Prefix: "/payments", Target: paymentsAddr, Role: "ADMIN"},
+	}
+}
+
+// LoadRoutes reads and validates the currently configured route source. It is
+// safe to use during reload because it does not mutate Config or global state.
+func (c *Config) LoadRoutes() ([]RouteConfig, error) {
+	if c == nil {
+		return loadRoutes("", defaultRoutes(nil), true)
+	}
+	return loadRoutes(c.RoutesFile, defaultRoutes(c), c.AuthEnabled)
+}
+
+func loadRoutes(path string, fallback []RouteConfig, authEnabled bool) ([]RouteConfig, error) {
+	routes := append([]RouteConfig(nil), fallback...)
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("ROUTES_FILE: unable to read route file")
+		}
+		var document struct {
+			Routes []RouteConfig `json:"routes"`
+		}
+		if err := json.Unmarshal(data, &document); err != nil {
+			return nil, errors.New("ROUTES_FILE: must contain valid JSON")
+		}
+		routes = document.Routes
+	}
+	routingRoutes := make([]routing.Route, 0, len(routes))
+	for _, route := range routes {
+		if !validUpstream(route.Target) {
+			return nil, fmt.Errorf("ROUTES_FILE: route %q must have an absolute HTTP(S) target without credentials or fragment", route.Prefix)
+		}
+		if authEnabled && strings.TrimSpace(route.Role) == "" {
+			return nil, fmt.Errorf("ROUTES_FILE: route %q requires a role while AUTH_ENABLED=true", route.Prefix)
+		}
+		routingRoutes = append(routingRoutes, routing.Route{Prefix: route.Prefix, Role: route.Role})
+	}
+	if _, err := routing.NewTable(routingRoutes); err != nil {
+		return nil, fmt.Errorf("ROUTES_FILE: %w", err)
+	}
+	return routes, nil
 }
 
 // RequiresRedis reports whether any enabled gateway policy needs Redis.
@@ -250,10 +335,19 @@ func (c *Config) Summary() string {
 	fmt.Fprintf(&b, "  Redis Address:        %s\n", c.RedisAddr)
 	fmt.Fprintf(&b, "  Redis Required:       %t\n", c.RequiresRedis())
 	fmt.Fprintf(&b, "  Access Logging:       %t\n", c.AccessLogEnabled)
-	fmt.Fprintf(&b, "  Upstream Services:\n")
-	fmt.Fprintf(&b, "    /users:             %s\n", c.UserServiceAddr)
-	fmt.Fprintf(&b, "    /admin:             %s\n", c.AdminServiceAddr)
-	fmt.Fprintf(&b, "    /payments:          %s\n", c.PaymentsServiceAddr)
+	if c.RoutesFile == "" {
+		fmt.Fprintf(&b, "  Route Source:         legacy environment variables\n")
+	} else {
+		fmt.Fprintf(&b, "  Route Source:         %s (reload with SIGHUP)\n", c.RoutesFile)
+	}
+	fmt.Fprintf(&b, "  Routes:\n")
+	for _, route := range c.Routes {
+		role := route.Role
+		if role == "" {
+			role = "none"
+		}
+		fmt.Fprintf(&b, "    %s -> %s (role: %s)\n", route.Prefix, route.Target, role)
+	}
 	fmt.Fprintf(&b, "  Rate Limiting:        enabled=%t (%d requests / %s per client IP)\n", c.RateLimitEnabled, c.RateLimitCount, c.RateLimitWindow)
 	fmt.Fprintf(&b, "  JWT Policy:           enabled=%t issuer=%q audience=%q (secret configured: %t)\n", c.AuthEnabled, c.JWTIssuer, c.JWTAudience, len(c.JWTSecret) > 0)
 	fmt.Fprintf(&b, "  Resource Limits:\n")

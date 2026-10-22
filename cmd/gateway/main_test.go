@@ -4,11 +4,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
+	"github.com/whilstsomebody/securegate/internal/routing"
 	"github.com/whilstsomebody/securegate/internal/version"
 )
 
@@ -75,7 +78,11 @@ func TestVersionAndCheckConfig(t *testing.T) {
 func TestPolicyFreeGatewayForwardsWithoutRedisOrAuthorization(t *testing.T) {
 	cfg := &config.Config{AuthEnabled: false, RateLimitEnabled: false, Limits: config.DefaultLimits()}
 	called := false
-	handler := newGatewayHandler(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	routes, err := routing.NewTable([]routing.Route{{Prefix: "/users"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newGatewayHandlerFor(cfg, routes, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -111,12 +118,15 @@ func TestPolicyFreeGatewayEndToEndWithRealUpstream(t *testing.T) {
 		Limits:              config.DefaultLimits(),
 	}
 
-	proxyHandler, err := newProxyHandler(cfg)
-	if err != nil {
-		t.Fatalf("newProxyHandler failed: %v", err)
+	cfg.Routes = []config.RouteConfig{
+		{Prefix: "/users", Target: upstream.URL},
+		{Prefix: "/admin", Target: upstream.URL},
+		{Prefix: "/payments", Target: upstream.URL},
 	}
-
-	gateway := newGatewayHandler(cfg, proxyHandler)
+	gateway, _, err := buildGatewayHandler(cfg, cfg.Routes)
+	if err != nil {
+		t.Fatalf("buildGatewayHandler failed: %v", err)
+	}
 
 	// 1. Unauthenticated request forwards directly and succeeds without requiring tokens or Redis
 	req := httptest.NewRequest(http.MethodGet, "/users/profile", nil)
@@ -156,5 +166,78 @@ func TestPolicyFreeGatewayEndToEndWithRealUpstream(t *testing.T) {
 	newManagementHandlerFor(cfg).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"redis":"disabled"`) {
 		t.Fatalf("expected redis disabled in readiness, got %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestReloadGatewayHandlerPublishesAtomically(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		_, _ = w.Write([]byte("slow"))
+	}))
+	defer slow.Close()
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fast"))
+	}))
+	defer fast.Close()
+
+	path := filepath.Join(t.TempDir(), "routes.json")
+	writeRoutes := func(target string) {
+		t.Helper()
+		contents := `{"routes":[{"prefix":"/api","target":"` + target + `"}]}`
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRoutes(slow.URL)
+	cfg := &config.Config{AuthEnabled: false, RateLimitEnabled: false, RoutesFile: path, Limits: config.DefaultLimits()}
+	routes, err := cfg.LoadRoutes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, table, err := buildGatewayHandler(cfg, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalTable := routing.Current()
+	routing.Replace(table)
+	t.Cleanup(func() { routing.Replace(originalTable) })
+	active := newSwappableHandler(initial)
+
+	inFlight := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		active.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/item", nil))
+		inFlight <- rr
+	}()
+	<-started
+
+	writeRoutes(fast.URL)
+	count, err := reloadGatewayHandler(cfg, active)
+	if err != nil || count != 1 {
+		t.Fatalf("reload count=%d err=%v", count, err)
+	}
+	current := httptest.NewRecorder()
+	active.ServeHTTP(current, httptest.NewRequest(http.MethodGet, "/api/item", nil))
+	if current.Code != http.StatusOK || current.Body.String() != "fast" {
+		t.Fatalf("new request used old routes: status=%d body=%q", current.Code, current.Body.String())
+	}
+
+	close(release)
+	old := <-inFlight
+	if old.Code != http.StatusOK || old.Body.String() != "slow" {
+		t.Fatalf("in-flight request was interrupted: status=%d body=%q", old.Code, old.Body.String())
+	}
+
+	writeRoutes("ftp://invalid.example")
+	if _, err := reloadGatewayHandler(cfg, active); err == nil {
+		t.Fatal("invalid reload was accepted")
+	}
+	stillCurrent := httptest.NewRecorder()
+	active.ServeHTTP(stillCurrent, httptest.NewRequest(http.MethodGet, "/api/item", nil))
+	if stillCurrent.Code != http.StatusOK || stillCurrent.Body.String() != "fast" {
+		t.Fatalf("invalid reload changed active routes: status=%d body=%q", stillCurrent.Code, stillCurrent.Body.String())
 	}
 }

@@ -30,6 +30,7 @@ func init() {
 type Route struct {
 	Prefix string
 	Target string
+	Role   string
 }
 
 // NewHandler constructs the standalone reverse-proxy core. It does not depend
@@ -37,10 +38,8 @@ type Route struct {
 // gateway middleware concerns.
 func NewHandler(routes []Route, transport http.RoundTripper) (http.Handler, error) {
 	targets := make(map[string]*url.URL, len(routes))
+	routingRoutes := make([]routing.Route, 0, len(routes))
 	for _, route := range routes {
-		if routing.Prefix(route.Prefix) != route.Prefix || route.Prefix == "" {
-			return nil, fmt.Errorf("invalid route prefix %q", route.Prefix)
-		}
 		target, err := url.Parse(route.Target)
 		if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") || target.User != nil || target.Fragment != "" {
 			return nil, fmt.Errorf("invalid upstream target for %s", route.Prefix)
@@ -49,6 +48,7 @@ func NewHandler(routes []Route, transport http.RoundTripper) (http.Handler, erro
 			return nil, fmt.Errorf("duplicate route prefix %s", route.Prefix)
 		}
 		targets[route.Prefix] = target
+		routingRoutes = append(routingRoutes, routing.Route{Prefix: route.Prefix, Role: route.Role})
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("at least one route is required")
@@ -56,21 +56,26 @@ func NewHandler(routes []Route, transport http.RoundTripper) (http.Handler, erro
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	return newCoreHandler(targets, transport), nil
+	table, err := routing.NewTable(routingRoutes)
+	if err != nil {
+		return nil, err
+	}
+	return newCoreHandler(table, targets, transport), nil
 }
 
-func newCoreHandler(targets map[string]*url.URL, transport http.RoundTripper) http.Handler {
+func newCoreHandler(table *routing.Table, targets map[string]*url.URL, transport http.RoundTripper) http.Handler {
 	breakers := map[string]*circuitbreaker.Breaker{}
 	for prefix := range targets {
 		breakers[prefix] = circuitbreaker.New(prefix, 5, 30*time.Second)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		targetURL := targets[routing.Prefix(r.URL.Path)]
-		if targetURL == nil {
+		route, matched := table.Match(r.URL.Path)
+		if !matched {
 			httpio.WriteError(w, r, http.StatusNotFound, "ROUTE_NOT_FOUND", "Not found")
 			return
 		}
-		breaker := breakers[routing.Prefix(r.URL.Path)]
+		targetURL := targets[route.Prefix]
+		breaker := breakers[route.Prefix]
 		finish, allowed := breaker.Acquire()
 		if !allowed {
 			w.Header().Set("Retry-After", "30")
@@ -96,7 +101,7 @@ func newCoreHandler(targets map[string]*url.URL, transport http.RoundTripper) ht
 		}
 		rp := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
-				rewriteURLPath(pr.Out.URL)
+				rewriteURLPath(pr.Out.URL, route.Prefix)
 				pr.SetURL(targetURL)
 				pr.Out.Host = pr.In.Host
 				pr.SetXForwarded()
@@ -108,7 +113,7 @@ func newCoreHandler(targets map[string]*url.URL, transport http.RoundTripper) ht
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				start := time.Now()
 				response, err := transport.RoundTrip(req)
-				metrics.UpstreamDuration.WithLabelValues(metrics.RouteLabel(r.URL.Path)).Observe(time.Since(start).Seconds())
+				metrics.UpstreamDuration.WithLabelValues(route.Prefix).Observe(time.Since(start).Seconds())
 				if err != nil {
 					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 						metrics.Timeouts.WithLabelValues("upstream_timeout").Inc()
@@ -130,7 +135,7 @@ func newCoreHandler(targets map[string]*url.URL, transport http.RoundTripper) ht
 				if r.Context().Err() != nil {
 					return
 				}
-				slog.Error("upstream error", "route", metrics.RouteLabel(r.URL.Path), "error", err, "request_id", r.Header.Get("X-Request-ID"))
+				slog.Error("upstream error", "route", route.Prefix, "error", err, "request_id", r.Header.Get("X-Request-ID"))
 				httpio.WriteError(w, req, http.StatusBadGateway, "BAD_GATEWAY", "Bad gateway")
 			},
 		}
@@ -156,11 +161,7 @@ func (b *errorBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func rewritePath(path string) string {
-	prefix := routing.Prefix(path)
-	if prefix == "" {
-		return path
-	}
+func rewritePath(path, prefix string) string {
 	after := strings.TrimPrefix(path, prefix)
 	if after == "" {
 		return "/"
@@ -171,8 +172,7 @@ func rewritePath(path string) string {
 // rewriteURLPath strips the decoded mount from both URL representations.
 // The mount's separating slash is structural (even when written as %2F).
 // Escapes in the remaining suffix are kept byte-for-byte, including their case.
-func rewriteURLPath(u *url.URL) {
-	prefix := routing.Prefix(u.Path)
+func rewriteURLPath(u *url.URL, prefix string) {
 	if prefix == "" {
 		return
 	}
@@ -194,6 +194,6 @@ func rewriteURLPath(u *url.URL) {
 		// Prefix() guarantees this next decoded byte is the mount separator '/'.
 		suffix = "/" + suffix[3:]
 	}
-	u.Path = rewritePath(u.Path)
+	u.Path = rewritePath(u.Path, prefix)
 	u.RawPath = suffix
 }

@@ -9,14 +9,19 @@ import (
 	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
+	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
 func MetricsMiddleware(next http.Handler) http.Handler {
-	accessLog := config.Cfg != nil && config.Cfg.AccessLogEnabled
+	return MetricsMiddlewareFor(next, config.Cfg, routing.Current())
+}
+
+func MetricsMiddlewareFor(next http.Handler, cfg *config.Config, routes *routing.Table) http.Handler {
+	accessLog := cfg != nil && cfg.AccessLogEnabled
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		path := r.URL.Path
-		route := metrics.RouteLabel(path)
+		route := metrics.RouteLabelFor(routes, path)
 		recorder := httpio.NewRecorder(w)
 		defer func() {
 			panicValue := recover()
