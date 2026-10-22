@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -42,6 +43,16 @@ func TestClientIPFallsBackToRemoteAddr(t *testing.T) {
 	}
 }
 
+func TestClientIPUsesTrustedProxyChain(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/users", nil)
+	req.RemoteAddr = "10.1.2.3:443"
+	req.Header.Set("X-Forwarded-For", "198.51.100.8, 192.0.2.2")
+	cfg := &config.Config{TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.0.2.0/24")}}
+	if got := clientIPFor(req, cfg); got != "198.51.100.8" {
+		t.Fatalf("client IP = %q", got)
+	}
+}
+
 func TestRateLimitMiddlewareAllows(t *testing.T) {
 	// Replace allowFn with a stub that always permits.
 	original := allowFn
@@ -76,5 +87,43 @@ func TestRateLimitMiddlewareBlocks(t *testing.T) {
 
 	if rr.Code != http.StatusTooManyRequests {
 		t.Errorf("expected 429, got %d", rr.Code)
+	}
+}
+
+func TestRateLimitMiddlewareWithTrustedProxyChain(t *testing.T) {
+	original := allowFn
+	defer func() { allowFn = original }()
+
+	var lastKey string
+	allowFn = func(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
+		lastKey = key
+		return true, nil
+	}
+
+	cfg := &config.Config{
+		TrustedProxyCIDRs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+		RateLimitCount:    10,
+		RateLimitWindow:   time.Minute,
+	}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler := RateLimitMiddlewareFor(inner, cfg, nil)
+
+	// Trusted proxy with forwarded chain
+	req := httptest.NewRequest(http.MethodGet, "/users/test", nil)
+	req.RemoteAddr = "10.1.2.3:443"
+	req.Header.Set("X-Forwarded-For", "198.51.100.55")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if lastKey != "198.51.100.55" {
+		t.Errorf("rate limit key = %q, want %q", lastKey, "198.51.100.55")
+	}
+
+	// Untrusted peer with spoofed header
+	req = httptest.NewRequest(http.MethodGet, "/users/test", nil)
+	req.RemoteAddr = "203.0.113.99:54321"
+	req.Header.Set("X-Forwarded-For", "198.51.100.55")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if lastKey != "203.0.113.99" {
+		t.Errorf("rate limit key = %q, want %q", lastKey, "203.0.113.99")
 	}
 }

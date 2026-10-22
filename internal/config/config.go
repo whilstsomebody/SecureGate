@@ -16,6 +16,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/whilstsomebody/securegate/internal/routing"
+	"github.com/whilstsomebody/securegate/internal/trustedproxy"
 )
 
 type RouteConfig struct {
@@ -44,6 +45,8 @@ type Config struct {
 	PaymentsServiceAddr string
 	GatewayPort         string
 	ManagementAddr      string
+	TrustedProxyCIDRs   []netip.Prefix
+	trustedProxies      trustedproxy.Policy
 	RoutesFile          string
 	Routes              []RouteConfig
 }
@@ -149,6 +152,12 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		}
 	}
 	cfg.RateLimitWindow = time.Duration(seconds) * time.Second
+	trustedProxyCIDRs, err := parseTrustedProxyCIDRs(get("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.TrustedProxyCIDRs = trustedProxyCIDRs
+	cfg.trustedProxies = trustedproxy.New(trustedProxyCIDRs)
 	// Preserve precise diagnostics for the legacy environment-based route
 	// settings. When ROUTES_FILE is configured it is the complete route source,
 	// so these values are intentionally ignored.
@@ -178,6 +187,42 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		return nil, errors.New("MANAGEMENT_ADDR: must be host:port with port between 1 and 65535")
 	}
 	return cfg, nil
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	items := strings.Split(raw, ",")
+	prefixes := make([]netip.Prefix, 0, len(items))
+	seen := make(map[netip.Prefix]struct{}, len(items))
+	for _, item := range items {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(item))
+		if err != nil || prefix != prefix.Masked() {
+			return nil, errors.New("TRUSTED_PROXY_CIDRS: must be a comma-separated list of canonical IP prefixes")
+		}
+		if _, exists := seen[prefix]; exists {
+			return nil, errors.New("TRUSTED_PROXY_CIDRS: must not contain duplicate prefixes")
+		}
+		seen[prefix] = struct{}{}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+// TrustedProxies returns the immutable policy used for client identity and
+// safe forwarding-header propagation.
+func (c *Config) TrustedProxies() trustedproxy.Policy {
+	if c == nil {
+		return trustedproxy.Policy{}
+	}
+	if len(c.TrustedProxyCIDRs) == 0 {
+		return trustedproxy.Policy{}
+	}
+	if c.trustedProxies.Len() != 0 {
+		return c.trustedProxies
+	}
+	return trustedproxy.New(c.TrustedProxyCIDRs)
 }
 
 func defaultRoutes(cfg *Config) []RouteConfig {
@@ -376,6 +421,15 @@ func (c *Config) Summary() string {
 	fmt.Fprintf(&b, "  Redis Address:        %s\n", c.RedisAddr)
 	fmt.Fprintf(&b, "  Redis Required:       %t\n", c.RequiresRedis())
 	fmt.Fprintf(&b, "  Access Logging:       %t\n", c.AccessLogEnabled)
+	if len(c.TrustedProxyCIDRs) == 0 {
+		fmt.Fprintf(&b, "  Trusted Proxies:      none\n")
+	} else {
+		prefixes := make([]string, len(c.TrustedProxyCIDRs))
+		for i, prefix := range c.TrustedProxyCIDRs {
+			prefixes[i] = prefix.String()
+		}
+		fmt.Fprintf(&b, "  Trusted Proxies:      %s\n", strings.Join(prefixes, ", "))
+	}
 	if c.RoutesFile == "" {
 		fmt.Fprintf(&b, "  Route Source:         legacy environment variables\n")
 	} else {

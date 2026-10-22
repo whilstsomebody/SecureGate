@@ -18,6 +18,7 @@ import (
 	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/routing"
+	"github.com/whilstsomebody/securegate/internal/trustedproxy"
 )
 
 func init() {
@@ -48,6 +49,7 @@ type Handler struct {
 	table     *routing.Table
 	pools     map[string]*backendPool
 	transport http.RoundTripper
+	trusted   trustedproxy.Policy
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -56,13 +58,13 @@ type Handler struct {
 // NewHandler constructs the standalone reverse-proxy core. It does not depend
 // on JWT, RBAC, rate limiting, revocation, or Redis. Those remain optional
 // gateway middleware concerns.
-func NewHandler(routes []Route, transport http.RoundTripper) (http.Handler, error) {
-	return NewManagedHandler(routes, transport)
+func NewHandler(routes []Route, transport http.RoundTripper, policies ...trustedproxy.Policy) (http.Handler, error) {
+	return NewManagedHandler(routes, transport, policies...)
 }
 
 // NewManagedHandler returns a closeable core handler. Call Close when the
 // handler is no longer used to stop active health checks and drain its pools.
-func NewManagedHandler(routes []Route, transport http.RoundTripper) (*Handler, error) {
+func NewManagedHandler(routes []Route, transport http.RoundTripper, policies ...trustedproxy.Policy) (*Handler, error) {
 	routingRoutes := make([]routing.Route, 0, len(routes))
 	for _, route := range routes {
 		routingRoutes = append(routingRoutes, routing.Route{Prefix: route.Prefix, Role: route.Role})
@@ -78,7 +80,11 @@ func NewManagedHandler(routes []Route, transport http.RoundTripper) (*Handler, e
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &Handler{table: table, pools: make(map[string]*backendPool, len(routes)), transport: transport, cancel: cancel}
+	trusted := trustedproxy.Policy{}
+	if len(policies) > 0 {
+		trusted = policies[0]
+	}
+	h := &Handler{table: table, pools: make(map[string]*backendPool, len(routes)), transport: transport, trusted: trusted, cancel: cancel}
 	for _, route := range routes {
 		pool, err := newBackendPool(route)
 		if err != nil {
@@ -140,11 +146,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rewriteURLPath(pr.Out.URL, route.Prefix)
 			pr.SetURL(backend.target)
 			pr.Out.Host = pr.In.Host
-			pr.SetXForwarded()
-			pr.Out.Header.Del("X-Real-IP")
-			if ip, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil {
-				pr.Out.Header.Set("X-Real-IP", ip)
-			}
+			h.setForwardedHeaders(pr)
 		},
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			start := time.Now()
@@ -177,6 +179,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rp.ServeHTTP(w, req)
 	completed = true
+}
+
+func (h *Handler) setForwardedHeaders(pr *httputil.ProxyRequest) {
+	headers := pr.Out.Header
+	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port", "X-Real-IP"} {
+		headers.Del(name)
+	}
+	if forwardedFor := h.trusted.ForwardedFor(pr.In); forwardedFor != "" {
+		headers.Set("X-Forwarded-For", forwardedFor)
+	}
+	if clientIP := h.trusted.ClientIP(pr.In); clientIP != "" {
+		headers.Set("X-Real-IP", clientIP)
+	}
+	if pr.In.Host != "" {
+		headers.Set("X-Forwarded-Host", pr.In.Host)
+	}
+	if pr.In.TLS != nil {
+		headers.Set("X-Forwarded-Proto", "https")
+	} else {
+		headers.Set("X-Forwarded-Proto", "http")
+	}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

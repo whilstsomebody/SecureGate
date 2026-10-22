@@ -2,7 +2,6 @@ package middlewares
 
 import (
 	"log/slog"
-	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,18 +11,21 @@ import (
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
 	"github.com/whilstsomebody/securegate/internal/routing"
+	"github.com/whilstsomebody/securegate/internal/trustedproxy"
 )
 
 // allowFn is the rate-limit check function; can be swapped in tests.
 var allowFn = ratelimit.AllowRequest
 
 func clientIP(r *http.Request) string {
-	// Forwarding headers are untrusted until trusted-proxy configuration exists.
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	return clientIPFor(r, config.Cfg)
+}
+
+func clientIPFor(r *http.Request, cfg *config.Config) string {
+	if cfg == nil {
+		return trustedproxy.Policy{}.ClientIP(r)
 	}
-	return ip
+	return cfg.TrustedProxies().ClientIP(r)
 }
 
 func RateLimitMiddleware(next http.Handler) http.Handler {
@@ -39,7 +41,7 @@ func RateLimitMiddlewareFor(next http.Handler, cfg *config.Config, routes *routi
 			window = cfg.RateLimitWindow
 		}
 
-		ip := clientIP(r)
+		ip := clientIPFor(r, cfg)
 		allowed, err := allowFn(r.Context(), ip, limit, window)
 		if err != nil {
 			slog.Error("rate limiter error", "error", err, "ip", ip, "request_id", r.Header.Get(RequestIDHeader))

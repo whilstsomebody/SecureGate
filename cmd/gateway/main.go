@@ -256,7 +256,7 @@ func buildGatewayHandler(cfg *config.Config, routes []config.RouteConfig) (http.
 	if err != nil {
 		return nil, nil, err
 	}
-	proxyHandler, err := proxy.NewManagedHandler(proxyRoutes, proxy.UpstreamTransport())
+	proxyHandler, err := proxy.NewManagedHandler(proxyRoutes, proxy.UpstreamTransport(), cfg.TrustedProxies())
 	if err != nil {
 		return nil, nil, err
 	}

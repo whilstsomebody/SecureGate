@@ -8,11 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/whilstsomebody/securegate/internal/middlewares"
+	"github.com/whilstsomebody/securegate/internal/trustedproxy"
 )
 
 func setUpstream(t *testing.T, handler http.Handler) *httptest.Server {
@@ -212,4 +214,37 @@ func TestForwardingIdentityIsRebuiltAndInputUnchanged(t *testing.T) {
 	if req.URL.Path != "/users/x" {
 		t.Errorf("input path mutated: %s", req.URL.Path)
 	}
+}
+
+func TestTrustedProxyForwardingUsesSanitizedChain(t *testing.T) {
+	h, err := NewHandler(
+		[]Route{{Prefix: "/users", Target: "http://users.test"}},
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if got, want := r.Header.Get("X-Forwarded-For"), "198.51.100.10, 192.0.2.7, 10.1.2.3"; got != want {
+				t.Errorf("X-Forwarded-For = %q, want %q", got, want)
+			}
+			if got := r.Header.Get("X-Real-IP"); got != "198.51.100.10" {
+				t.Errorf("X-Real-IP = %q", got)
+			}
+			if r.Header.Get("Forwarded") != "" || r.Header.Get("X-Forwarded-Port") != "" {
+				t.Errorf("spoofed forwarding headers reached upstream: %v", r.Header)
+			}
+			if r.Header.Get("X-Forwarded-Host") != "public.example" || r.Header.Get("X-Forwarded-Proto") != "http" {
+				t.Errorf("forwarding metadata = %v", r.Header)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		}),
+		trustedproxy.New([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.0.2.0/24")}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "http://public.example/users/x", nil)
+	req.Host = "public.example"
+	req.RemoteAddr = "10.1.2.3:443"
+	req.Header.Set("X-Forwarded-For", "198.51.100.10, 192.0.2.7")
+	req.Header.Set("X-Real-IP", "spoofed")
+	req.Header.Set("Forwarded", "for=spoofed")
+	req.Header.Set("X-Forwarded-Port", "1")
+	h.ServeHTTP(httptest.NewRecorder(), req)
 }

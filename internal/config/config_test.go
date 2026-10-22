@@ -140,6 +140,30 @@ func TestRouteBackendPoolValidation(t *testing.T) {
 	}
 }
 
+func TestTrustedProxyCIDRValidation(t *testing.T) {
+	prefixes, err := parseTrustedProxyCIDRs("10.0.0.0/8, 2001:db8::/32")
+	if err != nil || len(prefixes) != 2 {
+		t.Fatalf("valid trusted proxies = %#v, %v", prefixes, err)
+	}
+	for _, raw := range []string{"10.0.0.1/8", "10.0.0.0/8,10.0.0.0/8", "localhost", "10.0.0.0/33", "10.0.0.0/8,"} {
+		if _, err := parseTrustedProxyCIDRs(raw); err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXY_CIDRS") {
+			t.Fatalf("invalid trusted proxy CIDRs accepted: %q (%v)", raw, err)
+		}
+	}
+	cfg, err := fromEnvironment(func(key string) string {
+		if key == "JWT_SECRET" {
+			return "test-secret"
+		}
+		if key == "TRUSTED_PROXY_CIDRS" {
+			return "10.0.0.0/8"
+		}
+		return ""
+	})
+	if err != nil || len(cfg.TrustedProxyCIDRs) != 1 {
+		t.Fatalf("configuration did not retain trusted proxies: %#v, %v", cfg, err)
+	}
+}
+
 func TestValidEnvironmentOverrides(t *testing.T) {
 	env := map[string]string{
 		"JWT_SECRET": "test-secret", "JWT_ISSUER": "issuer", "JWT_AUDIENCE": "audience",
@@ -165,7 +189,7 @@ func TestValidEnvironmentOverrides(t *testing.T) {
 
 func TestLoadPublishesOnlyValidConfiguration(t *testing.T) {
 	t.Chdir(t.TempDir())
-	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT", "MANAGEMENT_ADDR", "ACCESS_LOG_ENABLED"} {
+	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT", "MANAGEMENT_ADDR", "ACCESS_LOG_ENABLED", "TRUSTED_PROXY_CIDRS"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("JWT_SECRET", "test-secret")
@@ -222,5 +246,18 @@ func TestCheckAndSummary(t *testing.T) {
 	}
 	if !strings.Contains(summary, "/users ->") || !strings.Contains(summary, "Max Connections:") {
 		t.Fatalf("summary missing essential keys: %s", summary)
+	}
+	if !strings.Contains(summary, "Trusted Proxies:      none") {
+		t.Fatalf("summary missing unset trusted proxies: %s", summary)
+	}
+
+	t.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 192.168.0.0/16")
+	cfgWithProxies, err := Check()
+	if err != nil {
+		t.Fatalf("check with proxies failed: %v", err)
+	}
+	summaryWithProxies := cfgWithProxies.Summary()
+	if !strings.Contains(summaryWithProxies, "Trusted Proxies:      10.0.0.0/8, 192.168.0.0/16") {
+		t.Fatalf("summary missing formatted trusted proxies: %s", summaryWithProxies)
 	}
 }

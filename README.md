@@ -124,6 +124,7 @@ SecureGate/
 | `ADMIN_SERVICE_ADDR` | `http://localhost:9003` | Legacy `/admin` service base URL, used only when `ROUTES_FILE` is unset |
 | `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Legacy `/payments` service base URL, used only when `ROUTES_FILE` is unset |
 | `ACCESS_LOG_ENABLED` | `false` | Enable per-request JSON access logs; metrics remain enabled |
+| `TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated canonical CIDRs allowed to supply `X-Forwarded-For`; unset means no forwarding headers are trusted |
 | `MANAGEMENT_ADDR` | `127.0.0.1:9000` | Separate management listener; restrict network access when overriding |
 | `GATEWAY_PORT` | `:8080` | Listen address, `host:port` or `:port` |
 
@@ -379,7 +380,17 @@ curl http://localhost:9000/ready
 
 The public `/auth/revoke` endpoint has been removed and returns 404. It must not be used to manage tokens. Existing revocation entries remain enforced; unavailable revocation storage returns 503. Token issuance and revocation should move to a separate identity service as the reverse-proxy core is extracted.
 
-Client identity for rate limiting comes from the TCP peer. Incoming `X-Forwarded-For` and `X-Real-IP` are not trusted. Deployments behind another proxy therefore share that proxy's rate-limit allowance until explicit trusted-proxy configuration is added.
+### Trusted proxies and client identity
+
+By default, SecureGate treats the TCP peer as the client. It ignores incoming `X-Forwarded-For`, `X-Real-IP`, `Forwarded`, and related forwarding headers, then rebuilds safe forwarding headers for each upstream request.
+
+For a known proxy tier, set `TRUSTED_PROXY_CIDRS` to canonical CIDRs, for example:
+
+```env
+TRUSTED_PROXY_CIDRS=10.0.0.0/8,192.0.2.0/24
+```
+
+SecureGate accepts `X-Forwarded-For` only when the direct peer matches this allowlist. It evaluates the chain from right to left, skipping configured proxy networks and selecting the first untrusted address as the client. That same address is used for rate-limit keys and outbound `X-Real-IP`. Outbound `X-Forwarded-For` contains the validated chain plus SecureGate’s direct peer; `Forwarded` and spoofable forwarding fields are removed. Invalid chains fall back to the trusted peer. Use only private, controlled proxy networks; do not trust broad public ranges.
 
 ### Rate limiting
 
@@ -581,7 +592,7 @@ With practical improvements in place, the project will move to the larger archit
 1. ✅ **Extract proxy core**: Reverse-proxy forwarding now accepts explicit startup route definitions and can run without JWT, RBAC, Redis, or rate limiting through proxy-only mode.
 2. ✅ **Dynamic routes & reload**: JSON route definitions, segment-safe longest-prefix routing, and validated atomic `SIGHUP` reloads that preserve in-flight requests.
 3. ✅ **Backend pools & load balancing**: Validated backend pools with active health checks, per-backend circuit breaking, round-robin or least-connections selection, and reload-time draining.
-4. **Explicit trusted-proxy configuration**: Safe forwarding header evaluation for multi-tier proxy topologies.
+4. ✅ **Explicit trusted-proxy configuration**: CIDR-validated proxy allowlists, safe multi-tier `X-Forwarded-For` evaluation, consistent rate-limit identity, and sanitized upstream forwarding headers.
 5. **TLS termination**: Native HTTPS termination support.
 6. **Comparative benchmarks**: Rigorous performance, latency, and resource benchmarking against nginx.
 
