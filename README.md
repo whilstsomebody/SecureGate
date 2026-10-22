@@ -19,7 +19,7 @@ SecureGate is a production-style **API Gateway** built in Go, designed to secure
 | **Structured Logging** | JSON via `log/slog`; every log line carries method, path, status, duration, request\_id |
 | **Prometheus Metrics** | Request count, latency histogram, rate-limit blocks, auth failures |
 | **Grafana Dashboards** | Pre-wired via Docker Compose |
-| **Health Endpoint** | `GET /health` probes Redis and returns JSON status |
+| **Health Endpoints** | Private management listener: `/health` for liveness, `/ready` for Redis readiness |
 | **Graceful Shutdown** | SIGINT/SIGTERM handled; 10-second drain window |
 | **Panic Recovery** | 500 before response commitment; interrupted responses are aborted without appending error text |
 
@@ -81,9 +81,10 @@ SecureGate is a production-style **API Gateway** built in Go, designed to secure
    └────────────┘ └────────────┘ └────────────┘
 
 
-Public endpoints (bypass auth):
-  GET  /metrics      → Prometheus scrape
-  GET  /health       → Redis probe → {"status":"ok","redis":"ok"}
+Private management listener (default 127.0.0.1:9000):
+  GET  /metrics      → Prometheus scrape on :9000
+  GET  /health       → process liveness on :9000
+  GET  /ready        → Redis readiness on :9000
   /auth/revoke      → retired; returns 404 without reading the body
 ```
 
@@ -252,6 +253,8 @@ curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/payments/checkout
 
 ```bash
 curl http://localhost:9000/health
+# {"status":"ok"}
+curl http://localhost:9000/ready
 # {"status":"ok","redis":"ok"}
 ```
 
@@ -281,8 +284,9 @@ done
 | `/users/*` | USER | port 9001 |
 | `/admin/*` | ADMIN | port 9003 |
 | `/payments/*` | ADMIN | port 9002 |
-| `/metrics` | *(public)* | Prometheus scrape |
-| `/health` | *(public)* | Redis probe |
+| `/metrics` | *(management listener only)* | Prometheus scrape |
+| `/health` | *(management listener only)* | Process liveness |
+| `/ready` | *(management listener only)* | Redis readiness |
 
 ---
 
@@ -318,7 +322,8 @@ Circuit breakers count each upstream attempt once, including truncated response 
 
 ```bash
 docker build -t securegate .
-docker run -p 8080:8080 --env-file .env securegate
+docker run --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
+  -p 8080:8080 --env-file .env securegate
 ```
 
 ---
@@ -330,7 +335,7 @@ make test
 # or: go test ./...
 ```
 
-Tests cover: circuit breaker state transitions, auth middleware (missing token, bad format, expired, forbidden role, valid, public paths), rate limit middleware (IP extraction from all proxy headers, allow/block via stub), panic recovery, proxy path rewriting, and RBAC rules. No live Redis required.
+Tests cover JWT policy and revocation failures, peer-based rate limiting, Redis cancellation/deadlines, management isolation, bounded IDs/logging, resource configuration, upload and streaming timeouts, admission limits, circuit breakers, response integrity, escaped routing, and RBAC. No live Redis is required for the Go test suite.
 
 ### Management listener migration
 
@@ -366,3 +371,9 @@ Settings are read once at startup; restart to apply changes. Capacities must be 
 | `SHUTDOWN_TIMEOUT_SECONDS` | `10` | Graceful shutdown budget |
 
 For long uploads, set `REQUEST_TIMEOUT_SECONDS=0` (or a larger total deadline). Client read-idle protection remains enabled; uploads must continue making progress. SSE and other responses have no total response-duration cap, but reads and writes must progress within their configured timeouts. Upgraded connections count against both admission budgets until they close; idle upgraded connections expire under the upstream read limit. SSE streams share the main request budget. Management limits remain separately fixed at 32 sockets and 8 requests, with two scrapes and two readiness checks at a time.
+
+### Container deployment notes
+
+The gateway builds with Go 1.25.6 (matching `go.mod`), with automatic toolchain downloads disabled in the builder. CI selects Go from `go.mod`, runs race tests, and builds the container. The final image contains the static gateway binary and CA certificates for HTTPS upstream verification, runs as UID/GID 65532, and supports a read-only filesystem. The build context excludes `.env`, Git metadata, tests, and unrelated project files. No runtime configuration secrets are baked into the image.
+
+The Compose file is a local development stack: Redis, Prometheus, and Grafana host ports bind only to `127.0.0.1`. Prometheus configuration is mounted read-only. Set Redis and backend URLs to addresses reachable from the gateway container; `localhost` inside a container refers to that container. For management access through a published container port, explicitly set `MANAGEMENT_ADDR=0.0.0.0:9000` and publish only to a trusted interface (for local access, `-p 127.0.0.1:9000:9000`). Host-run gateways keep the private loopback management default; Docker-hosted Prometheus needs a reachable bind address restricted to your monitoring network.

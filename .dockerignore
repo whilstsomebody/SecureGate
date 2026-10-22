@@ -1,0 +1,13 @@
+# Only source required by the gateway enters the build context.
+**
+!Dockerfile
+!go.mod
+!go.sum
+!internal/
+!internal/**
+!cmd/
+!cmd/gateway/
+!cmd/gateway/**
+**/*_test.go
+**/.env
+**/.env.*
