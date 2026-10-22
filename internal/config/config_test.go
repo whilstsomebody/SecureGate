@@ -18,7 +18,7 @@ func TestEnvironmentDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RateLimitCount != 5 || cfg.RateLimitWindow != 10*time.Second || cfg.JWTIssuer != "securegate" || cfg.JWTAudience != "securegate-api" || cfg.GatewayPort != ":8080" || cfg.RedisAddr != "127.0.0.1:6379" {
+	if !cfg.AuthEnabled || !cfg.RateLimitEnabled || cfg.RateLimitCount != 5 || cfg.RateLimitWindow != 10*time.Second || cfg.JWTIssuer != "securegate" || cfg.JWTAudience != "securegate-api" || cfg.GatewayPort != ":8080" || cfg.RedisAddr != "127.0.0.1:6379" {
 		t.Fatalf("defaults not preserved")
 	}
 }
@@ -26,6 +26,8 @@ func TestEnvironmentDefaults(t *testing.T) {
 func TestInvalidEnvironment(t *testing.T) {
 	cases := map[string][]string{
 		"ACCESS_LOG_ENABLED": {"typo"},
+		"AUTH_ENABLED":       {"typo"},
+		"RATE_LIMIT_ENABLED": {"typo"},
 		"JWT_SECRET":         {"", " \t"},
 		"JWT_ISSUER":         {" \t"}, "JWT_AUDIENCE": {" \t"},
 		"RATE_LIMIT_COUNT":          {"abc", "0", "-1", "1.5", " 5", "9999999999999999999999999"},
@@ -56,6 +58,26 @@ func TestInvalidEnvironment(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPolicyFreeModeDoesNotRequireJWTOrRedis(t *testing.T) {
+	cfg, err := fromEnvironment(func(key string) string {
+		switch key {
+		case "AUTH_ENABLED", "RATE_LIMIT_ENABLED":
+			return "false"
+		case "REDIS_ADDR":
+			return "not-a-redis-address"
+		case "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS":
+			return "not-used"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("policy-free configuration rejected: %v", err)
+	}
+	if cfg.AuthEnabled || cfg.RateLimitEnabled || cfg.RequiresRedis() {
+		t.Fatalf("policies unexpectedly enabled: %+v", cfg)
 	}
 }
 
@@ -143,4 +165,3 @@ func TestCheckAndSummary(t *testing.T) {
 		t.Fatalf("summary missing essential keys: %s", summary)
 	}
 }
-

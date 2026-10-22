@@ -128,6 +128,14 @@ func TestOperationalSmoke(t *testing.T) {
 	defer ratelimit.Rdb.Close()
 	metrics.RegisterMetrics()
 	proxy.ConfigureTransport(cfg.Limits)
+	proxyHandler, err := proxy.NewHandler([]proxy.Route{
+		{Prefix: "/users", Target: cfg.UserServiceAddr},
+		{Prefix: "/admin", Target: cfg.AdminServiceAddr},
+		{Prefix: "/payments", Target: cfg.PaymentsServiceAddr},
+	}, proxy.UpstreamTransport())
+	if err != nil {
+		t.Fatalf("NewHandler failed: %v", err)
+	}
 
 	// Build Gateway handler stack
 	secureHandler := middlewares.RequestIDMiddleware(
@@ -135,7 +143,7 @@ func TestOperationalSmoke(t *testing.T) {
 			middlewares.RecoveryMiddleware(
 				middlewares.RateLimitMiddleware(
 					middlewares.AuthMiddleware(
-						proxy.NewProxyhandler(),
+						proxyHandler,
 					),
 				),
 			),

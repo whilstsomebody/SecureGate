@@ -19,6 +19,8 @@ import (
 type Config struct {
 	Limits              ResourceLimits
 	AccessLogEnabled    bool
+	AuthEnabled         bool
+	RateLimitEnabled    bool
 	JWTSecret           string
 	JWTIssuer           string
 	JWTAudience         string
@@ -84,11 +86,26 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		GatewayPort:         value("GATEWAY_PORT", ":8080"),
 		ManagementAddr:      value("MANAGEMENT_ADDR", "127.0.0.1:9000"),
 	}
-	for _, setting := range []struct{ key, value string }{
-		{"JWT_SECRET", cfg.JWTSecret}, {"JWT_ISSUER", cfg.JWTIssuer}, {"JWT_AUDIENCE", cfg.JWTAudience},
+	for _, feature := range []struct {
+		key    string
+		target *bool
+	}{
+		{"AUTH_ENABLED", &cfg.AuthEnabled},
+		{"RATE_LIMIT_ENABLED", &cfg.RateLimitEnabled},
 	} {
-		if strings.TrimSpace(setting.value) == "" {
-			return nil, fmt.Errorf("%s: must not be blank", setting.key)
+		enabled, err := strconv.ParseBool(value(feature.key, "true"))
+		if err != nil {
+			return nil, fmt.Errorf("%s: must be a boolean", feature.key)
+		}
+		*feature.target = enabled
+	}
+	if cfg.AuthEnabled {
+		for _, setting := range []struct{ key, value string }{
+			{"JWT_SECRET", cfg.JWTSecret}, {"JWT_ISSUER", cfg.JWTIssuer}, {"JWT_AUDIENCE", cfg.JWTAudience},
+		} {
+			if strings.TrimSpace(setting.value) == "" {
+				return nil, fmt.Errorf("%s: must not be blank", setting.key)
+			}
 		}
 	}
 	accessLog, err := strconv.ParseBool(value("ACCESS_LOG_ENABLED", "false"))
@@ -96,9 +113,12 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		return nil, errors.New("ACCESS_LOG_ENABLED: must be a boolean")
 	}
 	cfg.AccessLogEnabled = accessLog
-	count, err := strconv.Atoi(value("RATE_LIMIT_COUNT", "5"))
-	if err != nil || count <= 0 {
-		return nil, errors.New("RATE_LIMIT_COUNT: must be a positive integer within the platform int range")
+	count := 5
+	if cfg.RateLimitEnabled {
+		count, err = strconv.Atoi(value("RATE_LIMIT_COUNT", "5"))
+		if err != nil || count <= 0 {
+			return nil, errors.New("RATE_LIMIT_COUNT: must be a positive integer within the platform int range")
+		}
 	}
 	limits, err := parseLimits(get)
 	if err != nil {
@@ -106,9 +126,12 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 	}
 	cfg.Limits = limits
 	cfg.RateLimitCount = count
-	seconds, err := strconv.ParseInt(value("RATE_LIMIT_WINDOW_SECONDS", "10"), 10, 64)
-	if err != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
-		return nil, errors.New("RATE_LIMIT_WINDOW_SECONDS: must be an integer between 1 and 9223372036")
+	seconds := int64(10)
+	if cfg.RateLimitEnabled {
+		seconds, err = strconv.ParseInt(value("RATE_LIMIT_WINDOW_SECONDS", "10"), 10, 64)
+		if err != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+			return nil, errors.New("RATE_LIMIT_WINDOW_SECONDS: must be an integer between 1 and 9223372036")
+		}
 	}
 	cfg.RateLimitWindow = time.Duration(seconds) * time.Second
 	for _, setting := range []struct{ key, value string }{
@@ -118,7 +141,7 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 			return nil, fmt.Errorf("%s: must be an absolute HTTP(S) URL with a valid host and port, without credentials or fragment", setting.key)
 		}
 	}
-	if !validAddress(cfg.RedisAddr, false) {
+	if cfg.RequiresRedis() && !validAddress(cfg.RedisAddr, false) {
 		return nil, errors.New("REDIS_ADDR: must be host:port with port between 1 and 65535")
 	}
 	if !validAddress(cfg.GatewayPort, true) {
@@ -128,6 +151,11 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		return nil, errors.New("MANAGEMENT_ADDR: must be host:port with port between 1 and 65535")
 	}
 	return cfg, nil
+}
+
+// RequiresRedis reports whether any enabled gateway policy needs Redis.
+func (c *Config) RequiresRedis() bool {
+	return c != nil && (c.AuthEnabled || c.RateLimitEnabled)
 }
 
 func validPort(port string) bool {
@@ -220,13 +248,14 @@ func (c *Config) Summary() string {
 	fmt.Fprintf(&b, "  Gateway Listen:       %s\n", c.GatewayPort)
 	fmt.Fprintf(&b, "  Management Listen:    %s\n", c.ManagementAddr)
 	fmt.Fprintf(&b, "  Redis Address:        %s\n", c.RedisAddr)
+	fmt.Fprintf(&b, "  Redis Required:       %t\n", c.RequiresRedis())
 	fmt.Fprintf(&b, "  Access Logging:       %t\n", c.AccessLogEnabled)
 	fmt.Fprintf(&b, "  Upstream Services:\n")
 	fmt.Fprintf(&b, "    /users:             %s\n", c.UserServiceAddr)
 	fmt.Fprintf(&b, "    /admin:             %s\n", c.AdminServiceAddr)
 	fmt.Fprintf(&b, "    /payments:          %s\n", c.PaymentsServiceAddr)
-	fmt.Fprintf(&b, "  Rate Limiting:        %d requests / %s per client IP\n", c.RateLimitCount, c.RateLimitWindow)
-	fmt.Fprintf(&b, "  JWT Policy:           issuer=%q audience=%q (secret configured: %t)\n", c.JWTIssuer, c.JWTAudience, len(c.JWTSecret) > 0)
+	fmt.Fprintf(&b, "  Rate Limiting:        enabled=%t (%d requests / %s per client IP)\n", c.RateLimitEnabled, c.RateLimitCount, c.RateLimitWindow)
+	fmt.Fprintf(&b, "  JWT Policy:           enabled=%t issuer=%q audience=%q (secret configured: %t)\n", c.AuthEnabled, c.JWTIssuer, c.JWTAudience, len(c.JWTSecret) > 0)
 	fmt.Fprintf(&b, "  Resource Limits:\n")
 	fmt.Fprintf(&b, "    Max Connections:    %d\n", c.Limits.MaxConnections)
 	fmt.Fprintf(&b, "    Max Requests:       %d (upgrades: %d)\n", c.Limits.MaxRequests, c.Limits.MaxUpgradeRequests)
@@ -244,4 +273,3 @@ func (c *Config) Summary() string {
 	fmt.Fprintf(&b, "      Shutdown Budget:  %s\n", c.Limits.ShutdownTimeout)
 	return b.String()
 }
-

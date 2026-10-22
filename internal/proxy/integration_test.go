@@ -12,27 +12,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/middlewares"
 )
 
 func setUpstream(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	upstream := httptest.NewServer(handler)
-	old := config.Cfg
-	config.Cfg = &config.Config{UserServiceAddr: upstream.URL}
-	t.Cleanup(func() { upstream.Close(); config.Cfg = old })
+	t.Cleanup(upstream.Close)
 	return upstream
 }
-func proxyServer(t *testing.T) *httptest.Server {
+func proxyServer(t *testing.T, target string) *httptest.Server {
 	t.Helper()
-	s := httptest.NewServer(middlewares.MetricsMiddleware(middlewares.RecoveryMiddleware(NewProxyhandler())))
+	handler := testProxyHandler(t, target, http.DefaultTransport)
+	s := httptest.NewServer(middlewares.MetricsMiddleware(middlewares.RecoveryMiddleware(handler)))
 	t.Cleanup(s.Close)
 	return s
 }
+
+func testProxyHandler(t *testing.T, target string, transport http.RoundTripper) http.Handler {
+	t.Helper()
+	handler, err := NewHandler([]Route{{Prefix: "/users", Target: target}}, transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler
+}
+
 func TestTransportFailuresCountOnce(t *testing.T) {
 	attempts := 0
-	h := newProxyHandler(roundTripFunc(func(*http.Request) (*http.Response, error) { attempts++; return nil, errors.New("backend unavailable") }))
+	h := testProxyHandler(t, "http://users.test", roundTripFunc(func(*http.Request) (*http.Response, error) { attempts++; return nil, errors.New("backend unavailable") }))
 	for i := 0; i < 6; i++ {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest("GET", "/users/x", nil))
@@ -49,7 +57,7 @@ func TestTransportFailuresCountOnce(t *testing.T) {
 	}
 }
 func TestTruncatedResponsesAbortAndOpenCircuit(t *testing.T) {
-	setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, rw, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			return
@@ -58,7 +66,7 @@ func TestTruncatedResponsesAbortAndOpenCircuit(t *testing.T) {
 		fmt.Fprint(rw, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n4\r\npart\r\n")
 		rw.Flush()
 	}))
-	s := proxyServer(t)
+	s := proxyServer(t, upstream.URL)
 	client := &http.Client{Timeout: 2 * time.Second}
 	for i := 0; i < 5; i++ {
 		resp, err := client.Get(s.URL + "/users/x")
@@ -82,7 +90,7 @@ func TestTruncatedResponsesAbortAndOpenCircuit(t *testing.T) {
 }
 func TestClientDisconnectsDoNotOpenCircuit(t *testing.T) {
 	entered := make(chan struct{}, 10)
-	setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/cancel" {
 			entered <- struct{}{}
 			<-r.Context().Done()
@@ -91,7 +99,7 @@ func TestClientDisconnectsDoNotOpenCircuit(t *testing.T) {
 		fmt.Fprint(w, "healthy")
 	}))
 	completed := make(chan struct{}, 10)
-	h := middlewares.MetricsMiddleware(middlewares.RecoveryMiddleware(NewProxyhandler()))
+	h := middlewares.MetricsMiddleware(middlewares.RecoveryMiddleware(testProxyHandler(t, upstream.URL, http.DefaultTransport)))
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() { completed <- struct{}{} }()
 		h.ServeHTTP(w, r)
@@ -128,7 +136,7 @@ func TestClientDisconnectsDoNotOpenCircuit(t *testing.T) {
 func TestStreamingEventArrivesBeforeUpstreamCloses(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
-	setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: ready\n\n")
 		w.(http.Flusher).Flush()
@@ -137,7 +145,7 @@ func TestStreamingEventArrivesBeforeUpstreamCloses(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	}))
-	s := proxyServer(t)
+	s := proxyServer(t, upstream.URL)
 	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(s.URL + "/users/events")
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +157,7 @@ func TestStreamingEventArrivesBeforeUpstreamCloses(t *testing.T) {
 	}
 }
 func TestUpgradeSupportsBidirectionalTraffic(t *testing.T) {
-	setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, rw, err := w.(http.Hijacker).Hijack()
 		if err != nil {
 			return
@@ -159,7 +167,7 @@ func TestUpgradeSupportsBidirectionalTraffic(t *testing.T) {
 		rw.Flush()
 		io.Copy(c, rw)
 	}))
-	s := proxyServer(t)
+	s := proxyServer(t, upstream.URL)
 
 	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(s.URL, "http://"), time.Second)
 	if err != nil {
@@ -189,7 +197,7 @@ func TestUpgradeSupportsBidirectionalTraffic(t *testing.T) {
 
 }
 func TestForwardingIdentityIsRebuiltAndInputUnchanged(t *testing.T) {
-	h := newProxyHandler(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	h := testProxyHandler(t, "http://users.test", roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("X-Forwarded-For") != "192.0.2.10" || r.Header.Get("X-Real-IP") != "192.0.2.10" || r.Header.Get("Forwarded") != "" || r.Header.Get("X-Forwarded-Proto") != "http" {
 			t.Errorf("untrusted identity: %v", r.Header)
 		}

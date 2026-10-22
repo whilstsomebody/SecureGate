@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -71,3 +72,22 @@ func TestVersionAndCheckConfig(t *testing.T) {
 	}
 }
 
+func TestPolicyFreeGatewayForwardsWithoutRedisOrAuthorization(t *testing.T) {
+	cfg := &config.Config{AuthEnabled: false, RateLimitEnabled: false, Limits: config.DefaultLimits()}
+	called := false
+	handler := newGatewayHandler(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/users/hello", nil))
+	if rr.Code != http.StatusNoContent || !called {
+		t.Fatalf("status=%d forwarded=%t", rr.Code, called)
+	}
+
+	rr = httptest.NewRecorder()
+	newManagementHandlerFor(cfg).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"redis":"disabled"`) {
+		t.Fatalf("policy-free readiness = %d %q", rr.Code, rr.Body.String())
+	}
+}

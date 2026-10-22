@@ -13,12 +13,18 @@ import (
 )
 
 var upstreamTransport = boundedTransport()
+var configuredTransport http.RoundTripper = readIdleTransport(upstreamTransport, config.DefaultLimits().UpstreamReadIdle)
 
 // ConfigureTransport is called once at startup, before requests are served.
 func ConfigureTransport(limits config.ResourceLimits) {
 	upstreamTransport.CloseIdleConnections()
 	upstreamTransport = transportWithLimits(limits)
+	configuredTransport = readIdleTransport(upstreamTransport, limits.UpstreamReadIdle)
 }
+
+// UpstreamTransport returns the bounded transport configured at startup. It is
+// exposed so callers can construct the proxy core without global route state.
+func UpstreamTransport() http.RoundTripper { return configuredTransport }
 
 func boundedTransport() *http.Transport { return transportWithLimits(config.DefaultLimits()) }
 

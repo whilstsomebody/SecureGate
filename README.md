@@ -114,7 +114,9 @@ SecureGate/
 | `JWT_SECRET` | *(required)* | HMAC secret for JWT signing and validation |
 | `JWT_ISSUER` | `securegate` | Required token issuer (`iss`), exact match |
 | `JWT_AUDIENCE` | `securegate-api` | Required token audience (`aud`), string or array containing this value |
+| `AUTH_ENABLED` | `true` | Apply JWT, revocation, and RBAC middleware; set `false` for proxy-only mode |
 | `REDIS_ADDR` | `127.0.0.1:6379` | Redis `host:port` address |
+| `RATE_LIMIT_ENABLED` | `true` | Apply Redis-backed peer-IP rate limiting |
 | `RATE_LIMIT_COUNT` | `5` | Positive integer; max requests per window per IP |
 | `RATE_LIMIT_WINDOW_SECONDS` | `10` | Integer window size, 1–9223372036 seconds |
 | `USER_SERVICE_ADDR` | `http://localhost:9001` | User service base URL |
@@ -124,7 +126,9 @@ SecureGate/
 | `MANAGEMENT_ADDR` | `127.0.0.1:9000` | Separate management listener; restrict network access when overriding |
 | `GATEWAY_PORT` | `:8080` | Listen address, `host:port` or `:port` |
 
-Configuration is validated before Redis initialization or opening the gateway listener. Invalid values stop startup with an error naming the setting. Missing or empty optional environment variables use the defaults above; whitespace-only JWT settings and malformed numeric settings are rejected. `JWT_SECRET` must be nonblank. Defaults no longer hide numeric typos, and duration overflow is rejected.
+Configuration is validated before Redis initialization or opening the gateway listener. Invalid values stop startup with an error naming the setting. Missing or empty optional environment variables use the defaults above; whitespace-only enabled JWT settings and malformed numeric settings are rejected. Defaults no longer hide numeric typos, and duration overflow is rejected.
+
+For proxy-only operation, set both `AUTH_ENABLED=false` and `RATE_LIMIT_ENABLED=false`. In that mode SecureGate does not require `JWT_SECRET`, does not connect to Redis, and reports readiness with `"redis":"disabled"`. Disabling only one policy keeps Redis required for the other. The default remains both policies enabled for backward compatibility.
 
 Upstreams require absolute `http://` or `https://` URLs with a hostname or IP address. Base paths and query strings are supported; embedded credentials and fragments are rejected. Explicit ports must be numeric and between 1 and 65535, including Redis and listener ports. Bracket IPv6 addresses, for example `http://[::1]:9001` and `[::]:8080`. Configuration validation checks syntax; DNS resolution and service availability are checked at runtime.
 
@@ -545,7 +549,7 @@ All items from the **Practical Improvements** milestone are complete:
 ### Remaining Architectural Work (Next Phase)
 
 With practical improvements in place, the project will move to the larger architectural milestones:
-1. **Extract proxy core**: Decouple reverse proxy forwarding from JWT, RBAC, and Redis policies.
+1. ✅ **Extract proxy core**: Reverse-proxy forwarding now accepts explicit startup route definitions and can run without JWT, RBAC, Redis, or rate limiting through proxy-only mode.
 2. **Dynamic routes & reload**: Configurable route definitions with atomic, zero-downtime reloads.
 3. **Backend pools & load balancing**: Health tracking, active drain, round-robin, and least-connections routing.
 4. **Explicit trusted-proxy configuration**: Safe forwarding header evaluation for multi-tier proxy topologies.

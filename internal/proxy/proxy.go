@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/whilstsomebody/securegate/internal/circuitbreaker"
-	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/routing"
@@ -24,24 +24,50 @@ func init() {
 	}
 }
 
-func NewProxyhandler() http.Handler {
-	return newProxyHandler(readIdleTransport(upstreamTransport, config.EffectiveLimits().UpstreamReadIdle))
+// Route is an explicit route definition for the proxy core. Prefix must be a
+// supported decoded mount such as /users, and Target must be an absolute HTTP
+// or HTTPS URL.
+type Route struct {
+	Prefix string
+	Target string
 }
 
-func newProxyHandler(transport http.RoundTripper) http.Handler {
+// NewHandler constructs the standalone reverse-proxy core. It does not depend
+// on JWT, RBAC, rate limiting, revocation, or Redis. Those remain optional
+// gateway middleware concerns.
+func NewHandler(routes []Route, transport http.RoundTripper) (http.Handler, error) {
+	targets := make(map[string]*url.URL, len(routes))
+	for _, route := range routes {
+		if routing.Prefix(route.Prefix) != route.Prefix || route.Prefix == "" {
+			return nil, fmt.Errorf("invalid route prefix %q", route.Prefix)
+		}
+		target, err := url.Parse(route.Target)
+		if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") || target.User != nil || target.Fragment != "" {
+			return nil, fmt.Errorf("invalid upstream target for %s", route.Prefix)
+		}
+		if _, exists := targets[route.Prefix]; exists {
+			return nil, fmt.Errorf("duplicate route prefix %s", route.Prefix)
+		}
+		targets[route.Prefix] = target
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("at least one route is required")
+	}
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	return newCoreHandler(targets, transport), nil
+}
+
+func newCoreHandler(targets map[string]*url.URL, transport http.RoundTripper) http.Handler {
 	breakers := map[string]*circuitbreaker.Breaker{}
-	for _, prefix := range []string{"/users", "/payments", "/admin"} {
+	for prefix := range targets {
 		breakers[prefix] = circuitbreaker.New(prefix, 5, 30*time.Second)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		target := getTargetService(r.URL.Path)
-		if target == "" {
+		targetURL := targets[routing.Prefix(r.URL.Path)]
+		if targetURL == nil {
 			httpio.WriteError(w, r, http.StatusNotFound, "ROUTE_NOT_FOUND", "Not found")
-			return
-		}
-		targetURL, err := url.Parse(target)
-		if err != nil || targetURL.Host == "" || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
-			httpio.WriteError(w, r, http.StatusInternalServerError, "INVALID_TARGET_URL", "Invalid target URL")
 			return
 		}
 		breaker := breakers[routing.Prefix(r.URL.Path)]
@@ -128,29 +154,6 @@ func (b *errorBody) Read(p []byte) (int, error) {
 		b.onError()
 	}
 	return n, err
-}
-
-func getTargetService(path string) string {
-	cfg := config.Cfg
-	if routing.Prefix(path) == "/users" {
-		if cfg != nil {
-			return cfg.UserServiceAddr
-		}
-		return "http://localhost:9001"
-	}
-	if routing.Prefix(path) == "/payments" {
-		if cfg != nil {
-			return cfg.PaymentsServiceAddr
-		}
-		return "http://localhost:9002"
-	}
-	if routing.Prefix(path) == "/admin" {
-		if cfg != nil {
-			return cfg.AdminServiceAddr
-		}
-		return "http://localhost:9003"
-	}
-	return ""
 }
 
 func rewritePath(path string) string {

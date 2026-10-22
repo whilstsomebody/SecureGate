@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
@@ -16,7 +15,6 @@ func TestEncodedPathsOnUpstreamWire(t *testing.T) {
 	upstream := setUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, r.RequestURI)
 	}))
-	proxy := proxyServer(t)
 	client := &http.Client{Timeout: 2 * time.Second}
 	cases := []struct{ path, base, want string }{
 		{"/users/a%2Fb", "", "/a%2Fb"},
@@ -36,7 +34,12 @@ func TestEncodedPathsOnUpstreamWire(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.path+tt.base, func(t *testing.T) {
-			config.Cfg.UserServiceAddr = upstream.URL + tt.base
+			handler, err := NewHandler([]Route{{Prefix: "/users", Target: upstream.URL + tt.base}}, http.DefaultTransport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxy := httptest.NewServer(handler)
+			defer proxy.Close()
 			response, err := client.Get(proxy.URL + tt.path)
 			if err != nil {
 				t.Fatal(err)
@@ -51,7 +54,7 @@ func TestEncodedPathsOnUpstreamWire(t *testing.T) {
 }
 
 func TestLookalikeRoutesDoNotReachTransport(t *testing.T) {
-	handler := newProxyHandler(roundTripFunc(func(*http.Request) (*http.Response, error) {
+	handler := testProxyHandler(t, "http://users.test", roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("unmatched route reached upstream")
 		return nil, nil
 	}))
@@ -71,7 +74,7 @@ func TestLookalikeRoutesDoNotReachTransport(t *testing.T) {
 func TestRewritePreservesIncomingEncodedURL(t *testing.T) {
 	req := httptest.NewRequest("GET", "/%75sers/a%2Fb?q=a%2Fb", nil)
 	before := *req.URL
-	handler := newProxyHandler(roundTripFunc(func(out *http.Request) (*http.Response, error) {
+	handler := testProxyHandler(t, "http://users.test", roundTripFunc(func(out *http.Request) (*http.Response, error) {
 		if out.URL.EscapedPath() != "/a%2Fb" {
 			t.Errorf("outbound path=%s", out.URL.EscapedPath())
 		}
