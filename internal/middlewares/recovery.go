@@ -25,7 +25,7 @@ func RecoveryMiddleware(next http.Handler) http.Handler {
 				if recorder.Committed {
 					panic(http.ErrAbortHandler)
 				}
-				http.Error(recorder, "Internal server error", http.StatusInternalServerError)
+				httpio.WriteError(recorder, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "Internal server error")
 			}
 		}()
 		next.ServeHTTP(recorder, r)

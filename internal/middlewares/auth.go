@@ -8,6 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/whilstsomebody/securegate/internal/auth"
 	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
 	"github.com/whilstsomebody/securegate/internal/routing"
@@ -20,21 +21,21 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "missing_authorization_header").Inc()
-			http.Error(w, "Missing authorization token!", http.StatusUnauthorized)
+			httpio.WriteError(w, r, http.StatusUnauthorized, "MISSING_AUTHORIZATION", "Missing authorization token")
 			return
 		}
 
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_authorization_format").Inc()
-			http.Error(w, "Invalid authorization format!", http.StatusUnauthorized)
+			httpio.WriteError(w, r, http.StatusUnauthorized, "INVALID_AUTHORIZATION_FORMAT", "Invalid authorization format")
 			return
 		}
 
 		tokenString := parts[1]
 		cfg := config.Cfg
 		if cfg == nil || cfg.JWTSecret == "" || strings.TrimSpace(cfg.JWTIssuer) == "" || strings.TrimSpace(cfg.JWTAudience) == "" {
-			http.Error(w, "Authentication service unavailable", http.StatusServiceUnavailable)
+			httpio.WriteError(w, r, http.StatusServiceUnavailable, "AUTH_SERVICE_UNAVAILABLE", "Authentication service unavailable")
 			return
 		}
 		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
@@ -44,28 +45,28 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		if err != nil || !token.Valid {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_or_expired_token").Inc()
-			http.Error(w, "Invalid or Expired token", http.StatusUnauthorized)
+			httpio.WriteError(w, r, http.StatusUnauthorized, "INVALID_OR_EXPIRED_TOKEN", "Invalid or expired token")
 			return
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_token_claims").Inc()
-			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			httpio.WriteError(w, r, http.StatusUnauthorized, "INVALID_TOKEN_CLAIMS", "Invalid token claims")
 			return
 		}
 
 		role, ok := claims["role"].(string)
 		if !ok || role == "" {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "missing_role_claim").Inc()
-			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			httpio.WriteError(w, r, http.StatusUnauthorized, "MISSING_ROLE_CLAIM", "Missing role claim")
 			return
 		}
 
 		jti, ok := claims["jti"].(string)
 		if !ok || strings.TrimSpace(jti) == "" {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_token_claims").Inc()
-			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			httpio.WriteError(w, r, http.StatusUnauthorized, "INVALID_TOKEN_CLAIMS", "Invalid token claims")
 			return
 		}
 
@@ -73,18 +74,19 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		if err != nil {
 			slog.Error("revocation check failed", "error", err, "request_id", requestID)
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "revocation_unavailable").Inc()
-			http.Error(w, "Authentication service unavailable", http.StatusServiceUnavailable)
+			w.Header().Set("Retry-After", "5")
+			httpio.WriteError(w, r, http.StatusServiceUnavailable, "REVOCATION_UNAVAILABLE", "Authentication service unavailable")
 			return
 		} else if revoked {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "token_revoked").Inc()
-			http.Error(w, "Token has been revoked", http.StatusUnauthorized)
+			httpio.WriteError(w, r, http.StatusUnauthorized, "TOKEN_REVOKED", "Token has been revoked")
 			return
 		}
 
 		if !isAuthorized(r.URL.Path, role) {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "rbac_forbidden").Inc()
 			slog.Debug("access forbidden", "route", metrics.RouteLabel(r.URL.Path), "request_id", requestID)
-			http.Error(w, "Access forbidden: Insufficient role permission", http.StatusForbidden)
+			httpio.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "Access forbidden: Insufficient role permission")
 			return
 		}
 

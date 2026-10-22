@@ -4,9 +4,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
 )
@@ -36,14 +38,20 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 		allowed, err := allowFn(r.Context(), ip, limit, window)
 		if err != nil {
 			slog.Error("rate limiter error", "error", err, "ip", ip, "request_id", r.Header.Get(RequestIDHeader))
-			http.Error(w, "Rate limiter unavailable", http.StatusServiceUnavailable)
+			w.Header().Set("Retry-After", "5")
+			httpio.WriteError(w, r, http.StatusServiceUnavailable, "RATE_LIMITER_UNAVAILABLE", "Rate limiter unavailable")
 			return
 		}
 
 		if !allowed {
 			slog.Debug("rate limit exceeded", "ip", ip, "route", metrics.RouteLabel(r.URL.Path), "request_id", r.Header.Get(RequestIDHeader))
 			metrics.RateLimitedCount.WithLabelValues(metrics.RouteLabel(r.URL.Path)).Inc()
-			http.Error(w, "Too many requests to resolve.", http.StatusTooManyRequests)
+			retrySeconds := int(window.Seconds())
+			if retrySeconds < 1 {
+				retrySeconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+			httpio.WriteError(w, r, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Too many requests to resolve")
 			return
 		}
 
