@@ -54,8 +54,10 @@ func TestMetricCollectorsUpdateWithoutPanic(t *testing.T) {
 	Timeouts.WithLabelValues("upstream_timeout").Inc()
 	Timeouts.WithLabelValues("client_read_idle").Inc()
 
-	CircuitBreakerState.WithLabelValues("/users").Set(0)
-	CircuitBreakerState.WithLabelValues("/users").Set(1)
+	CircuitBreakerState.WithLabelValues("/users", "http://users.test").Set(0)
+	CircuitBreakerState.WithLabelValues("/users", "http://users.test").Set(1)
+	BackendHealth.WithLabelValues("/users", "http://users.test").Set(1)
+	BackendActive.WithLabelValues("/users", "http://users.test").Set(0)
 
 	UpstreamDuration.WithLabelValues("/users").Observe(0.025)
 	BuildInfo.WithLabelValues("v0.2.0-dev", "test", "go1.26").Set(1)

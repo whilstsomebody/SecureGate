@@ -19,9 +19,13 @@ import (
 )
 
 type RouteConfig struct {
-	Prefix string `json:"prefix"`
-	Target string `json:"target"`
-	Role   string `json:"role,omitempty"`
+	Prefix                     string   `json:"prefix"`
+	Target                     string   `json:"target,omitempty"`
+	Backends                   []string `json:"backends,omitempty"`
+	Balance                    string   `json:"balance,omitempty"`
+	HealthCheckPath            string   `json:"health_check_path,omitempty"`
+	HealthCheckIntervalSeconds int      `json:"health_check_interval_seconds,omitempty"`
+	Role                       string   `json:"role,omitempty"`
 }
 
 type Config struct {
@@ -224,8 +228,23 @@ func loadRoutes(path string, fallback []RouteConfig, authEnabled bool) ([]RouteC
 	}
 	routingRoutes := make([]routing.Route, 0, len(routes))
 	for _, route := range routes {
-		if !validUpstream(route.Target) {
-			return nil, fmt.Errorf("ROUTES_FILE: route %q must have an absolute HTTP(S) target without credentials or fragment", route.Prefix)
+		backends, err := routeBackends(route)
+		if err != nil {
+			return nil, fmt.Errorf("ROUTES_FILE: route %q: %w", route.Prefix, err)
+		}
+		for _, backend := range backends {
+			if !validUpstream(backend) {
+				return nil, fmt.Errorf("ROUTES_FILE: route %q must have absolute HTTP(S) backend URLs without credentials or fragments", route.Prefix)
+			}
+		}
+		if route.Balance != "" && route.Balance != "round_robin" && route.Balance != "least_connections" {
+			return nil, fmt.Errorf("ROUTES_FILE: route %q balance must be round_robin or least_connections", route.Prefix)
+		}
+		if route.HealthCheckPath != "" && (!strings.HasPrefix(route.HealthCheckPath, "/") || strings.ContainsAny(route.HealthCheckPath, "?#")) {
+			return nil, fmt.Errorf("ROUTES_FILE: route %q health_check_path must be an absolute path without query or fragment", route.Prefix)
+		}
+		if route.HealthCheckIntervalSeconds < 0 || route.HealthCheckIntervalSeconds > 3600 {
+			return nil, fmt.Errorf("ROUTES_FILE: route %q health_check_interval_seconds must be between 0 and 3600", route.Prefix)
 		}
 		if authEnabled && strings.TrimSpace(route.Role) == "" {
 			return nil, fmt.Errorf("ROUTES_FILE: route %q requires a role while AUTH_ENABLED=true", route.Prefix)
@@ -236,6 +255,28 @@ func loadRoutes(path string, fallback []RouteConfig, authEnabled bool) ([]RouteC
 		return nil, fmt.Errorf("ROUTES_FILE: %w", err)
 	}
 	return routes, nil
+}
+
+func routeBackends(route RouteConfig) ([]string, error) {
+	if route.Target != "" && len(route.Backends) != 0 {
+		return nil, errors.New("target and backends cannot both be set")
+	}
+	if route.Target != "" {
+		return []string{route.Target}, nil
+	}
+	if len(route.Backends) == 0 {
+		return nil, errors.New("must define target or at least one backend")
+	}
+	seen := make(map[string]struct{}, len(route.Backends))
+	backends := make([]string, 0, len(route.Backends))
+	for _, backend := range route.Backends {
+		if _, exists := seen[backend]; exists {
+			return nil, fmt.Errorf("duplicates backend %q", backend)
+		}
+		seen[backend] = struct{}{}
+		backends = append(backends, backend)
+	}
+	return backends, nil
 }
 
 // RequiresRedis reports whether any enabled gateway policy needs Redis.
@@ -346,7 +387,12 @@ func (c *Config) Summary() string {
 		if role == "" {
 			role = "none"
 		}
-		fmt.Fprintf(&b, "    %s -> %s (role: %s)\n", route.Prefix, route.Target, role)
+		backends, _ := routeBackends(route)
+		balance := route.Balance
+		if balance == "" {
+			balance = "round_robin"
+		}
+		fmt.Fprintf(&b, "    %s -> %s (balance: %s, role: %s)\n", route.Prefix, strings.Join(backends, ", "), balance, role)
 	}
 	fmt.Fprintf(&b, "  Rate Limiting:        enabled=%t (%d requests / %s per client IP)\n", c.RateLimitEnabled, c.RateLimitCount, c.RateLimitWindow)
 	fmt.Fprintf(&b, "  JWT Policy:           enabled=%t issuer=%q audience=%q (secret configured: %t)\n", c.AuthEnabled, c.JWTIssuer, c.JWTAudience, len(c.JWTSecret) > 0)

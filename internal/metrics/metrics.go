@@ -90,9 +90,19 @@ var (
 	CircuitBreakerState = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "securegate_circuit_breaker_state",
-			Help: "Circuit breaker state by route (0=CLOSED, 1=OPEN, 2=HALF_OPEN)",
+			Help: "Circuit breaker state by route and backend (0=CLOSED, 1=OPEN, 2=HALF_OPEN)",
 		},
-		[]string{"route"},
+		[]string{"route", "backend"},
+	)
+
+	BackendHealth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "securegate_backend_healthy", Help: "Active health-check result for configured backends (1=healthy, 0=unhealthy)"},
+		[]string{"route", "backend"},
+	)
+
+	BackendActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "securegate_backend_active_requests", Help: "Current requests assigned to each backend"},
+		[]string{"route", "backend"},
 	)
 
 	BuildInfo = prometheus.NewGaugeVec(
@@ -109,7 +119,7 @@ func RegisterMetrics() {
 	collectors := []prometheus.Collector{
 		RequestCount, RequestDuration, RateLimitedCount, AuthFailures, ResponseAborts,
 		AdmissionRejections, ActiveConnections, ActiveRequests, ActiveUpgrades,
-		UpstreamDuration, Timeouts, CircuitBreakerState, BuildInfo,
+		UpstreamDuration, Timeouts, CircuitBreakerState, BackendHealth, BackendActive, BuildInfo,
 	}
 	for _, c := range collectors {
 		if err := prometheus.Register(c); err != nil {

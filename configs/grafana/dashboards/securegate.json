@@ -221,7 +221,7 @@
       "targets": [
         {
           "expr": "securegate_circuit_breaker_state",
-          "legendFormat": "{{route}}"
+          "legendFormat": "{{route}} {{backend}}"
         }
       ],
       "title": "Circuit Breaker State",
@@ -230,6 +230,62 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "id": 104,
+      "title": "Backend Pools & Load",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "color": "red", "text": "UNHEALTHY" }, "1": { "color": "green", "text": "HEALTHY" } }, "type": "value" }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 26 },
+      "id": 10,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "securegate_backend_healthy",
+          "legendFormat": "{{route}} {{backend}}"
+        }
+      ],
+      "title": "Backend Health Status",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2 }
+        }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 26 },
+      "id": 11,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        {
+          "expr": "securegate_backend_active_requests",
+          "legendFormat": "{{route}} {{backend}}"
+        }
+      ],
+      "title": "Backend Active Requests",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
       "id": 103,
       "title": "Timeouts & Failures",
       "type": "row"
@@ -242,7 +298,7 @@
           "custom": { "drawStyle": "line", "lineInterpolation": "linear" }
         }
       },
-      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 26 },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 34 },
       "id": 9,
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "sum"] } },
       "targets": [

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,37 +22,52 @@ import (
 
 func init() {
 	circuitbreaker.OnStateChange = func(name string, state circuitbreaker.State) {
-		metrics.CircuitBreakerState.WithLabelValues(name).Set(float64(state))
+		route, backend, ok := strings.Cut(name, "\x00")
+		if !ok {
+			backend = "unknown"
+		}
+		metrics.CircuitBreakerState.WithLabelValues(route, backend).Set(float64(state))
 	}
 }
 
-// Route is an explicit route definition for the proxy core. Prefix must be a
-// supported decoded mount such as /users, and Target must be an absolute HTTP
-// or HTTPS URL.
+// Route is an explicit route definition for the proxy core. Target is kept for
+// single-backend compatibility; Backends defines a load-balanced backend pool.
 type Route struct {
-	Prefix string
-	Target string
-	Role   string
+	Prefix                     string
+	Target                     string
+	Backends                   []string
+	Balance                    string
+	HealthCheckPath            string
+	HealthCheckIntervalSeconds int
+	Role                       string
+}
+
+// Handler owns proxy pools and their active health checks. Call Close when a
+// replaced handler has drained so its health-check workers stop cleanly.
+type Handler struct {
+	table     *routing.Table
+	pools     map[string]*backendPool
+	transport http.RoundTripper
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // NewHandler constructs the standalone reverse-proxy core. It does not depend
 // on JWT, RBAC, rate limiting, revocation, or Redis. Those remain optional
 // gateway middleware concerns.
 func NewHandler(routes []Route, transport http.RoundTripper) (http.Handler, error) {
-	targets := make(map[string]*url.URL, len(routes))
+	return NewManagedHandler(routes, transport)
+}
+
+// NewManagedHandler returns a closeable core handler. Call Close when the
+// handler is no longer used to stop active health checks and drain its pools.
+func NewManagedHandler(routes []Route, transport http.RoundTripper) (*Handler, error) {
 	routingRoutes := make([]routing.Route, 0, len(routes))
 	for _, route := range routes {
-		target, err := url.Parse(route.Target)
-		if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") || target.User != nil || target.Fragment != "" {
-			return nil, fmt.Errorf("invalid upstream target for %s", route.Prefix)
-		}
-		if _, exists := targets[route.Prefix]; exists {
-			return nil, fmt.Errorf("duplicate route prefix %s", route.Prefix)
-		}
-		targets[route.Prefix] = target
 		routingRoutes = append(routingRoutes, routing.Route{Prefix: route.Prefix, Role: route.Role})
 	}
-	if len(targets) == 0 {
+	if len(routes) == 0 {
 		return nil, fmt.Errorf("at least one route is required")
 	}
 	if transport == nil {
@@ -60,88 +77,106 @@ func NewHandler(routes []Route, transport http.RoundTripper) (http.Handler, erro
 	if err != nil {
 		return nil, err
 	}
-	return newCoreHandler(table, targets, transport), nil
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &Handler{table: table, pools: make(map[string]*backendPool, len(routes)), transport: transport, cancel: cancel}
+	for _, route := range routes {
+		pool, err := newBackendPool(route)
+		if err != nil {
+			return nil, fmt.Errorf("route %s: %w", route.Prefix, err)
+		}
+		h.pools[route.Prefix] = pool
+	}
+	for _, pool := range h.pools {
+		pool.startHealthChecks(ctx, &h.wg, transport)
+	}
+	return h, nil
 }
 
-func newCoreHandler(table *routing.Table, targets map[string]*url.URL, transport http.RoundTripper) http.Handler {
-	breakers := map[string]*circuitbreaker.Breaker{}
-	for prefix := range targets {
-		breakers[prefix] = circuitbreaker.New(prefix, 5, 30*time.Second)
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		route, matched := table.Match(r.URL.Path)
-		if !matched {
-			httpio.WriteError(w, r, http.StatusNotFound, "ROUTE_NOT_FOUND", "Not found")
-			return
+// Close drains every pool from new selections and stops background health
+// checks. Requests that already acquired a backend retain it until completion.
+func (h *Handler) Close() {
+	h.closeOnce.Do(func() {
+		for _, pool := range h.pools {
+			pool.Drain()
 		}
-		targetURL := targets[route.Prefix]
-		breaker := breakers[route.Prefix]
-		finish, allowed := breaker.Acquire()
-		if !allowed {
-			w.Header().Set("Retry-After", "30")
-			httpio.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Service temporarily unavailable")
-			return
-		}
-		var upstreamFailed, clientBodyFailed atomic.Bool
-		completed, gotResponse := false, false
-		defer func() {
-			outcome := circuitbreaker.Neutral
-			if r.Context().Err() == nil && !clientBodyFailed.Load() {
-				if upstreamFailed.Load() {
-					outcome = circuitbreaker.Failure
-				} else if completed && gotResponse {
-					outcome = circuitbreaker.Success
-				}
-			}
-			finish(outcome)
-		}()
-		req := r.Clone(r.Context())
-		if req.Body != nil {
-			req.Body = &errorBody{ReadCloser: req.Body, onError: func() { clientBodyFailed.Store(true) }}
-		}
-		rp := &httputil.ReverseProxy{
-			Rewrite: func(pr *httputil.ProxyRequest) {
-				rewriteURLPath(pr.Out.URL, route.Prefix)
-				pr.SetURL(targetURL)
-				pr.Out.Host = pr.In.Host
-				pr.SetXForwarded()
-				pr.Out.Header.Del("X-Real-IP")
-				if ip, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil {
-					pr.Out.Header.Set("X-Real-IP", ip)
-				}
-			},
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				start := time.Now()
-				response, err := transport.RoundTrip(req)
-				metrics.UpstreamDuration.WithLabelValues(route.Prefix).Observe(time.Since(start).Seconds())
-				if err != nil {
-					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						metrics.Timeouts.WithLabelValues("upstream_timeout").Inc()
-					}
-					upstreamFailed.Store(true)
-					return response, err
-				}
-				gotResponse = true
-				if response.StatusCode >= 500 {
-					upstreamFailed.Store(true)
-				}
-				// Upgrade bodies must retain their io.ReadWriteCloser capability.
-				if response.StatusCode != http.StatusSwitchingProtocols {
-					response.Body = &errorBody{ReadCloser: response.Body, onError: func() { upstreamFailed.Store(true) }}
-				}
-				return response, nil
-			}),
-			ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-				if r.Context().Err() != nil {
-					return
-				}
-				slog.Error("upstream error", "route", route.Prefix, "error", err, "request_id", r.Header.Get("X-Request-ID"))
-				httpio.WriteError(w, req, http.StatusBadGateway, "BAD_GATEWAY", "Bad gateway")
-			},
-		}
-		rp.ServeHTTP(w, req)
-		completed = true
+		h.cancel()
+		h.wg.Wait()
 	})
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	route, matched := h.table.Match(r.URL.Path)
+	if !matched {
+		httpio.WriteError(w, r, http.StatusNotFound, "ROUTE_NOT_FOUND", "Not found")
+		return
+	}
+	pool := h.pools[route.Prefix]
+	backend, finish, allowed := pool.Acquire()
+	if !allowed {
+		w.Header().Set("Retry-After", "30")
+		httpio.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "No healthy backend available")
+		return
+	}
+	defer pool.Release(backend)
+	var upstreamFailed, clientBodyFailed atomic.Bool
+	completed, gotResponse := false, false
+	defer func() {
+		outcome := circuitbreaker.Neutral
+		if r.Context().Err() == nil && !clientBodyFailed.Load() {
+			if upstreamFailed.Load() {
+				outcome = circuitbreaker.Failure
+			} else if completed && gotResponse {
+				outcome = circuitbreaker.Success
+			}
+		}
+		finish(outcome)
+	}()
+	req := r.Clone(r.Context())
+	if req.Body != nil {
+		req.Body = &errorBody{ReadCloser: req.Body, onError: func() { clientBodyFailed.Store(true) }}
+	}
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			rewriteURLPath(pr.Out.URL, route.Prefix)
+			pr.SetURL(backend.target)
+			pr.Out.Host = pr.In.Host
+			pr.SetXForwarded()
+			pr.Out.Header.Del("X-Real-IP")
+			if ip, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil {
+				pr.Out.Header.Set("X-Real-IP", ip)
+			}
+		},
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			start := time.Now()
+			response, err := h.transport.RoundTrip(req)
+			metrics.UpstreamDuration.WithLabelValues(route.Prefix).Observe(time.Since(start).Seconds())
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					metrics.Timeouts.WithLabelValues("upstream_timeout").Inc()
+				}
+				upstreamFailed.Store(true)
+				return response, err
+			}
+			gotResponse = true
+			if response.StatusCode >= 500 {
+				upstreamFailed.Store(true)
+			}
+			// Upgrade bodies must retain their io.ReadWriteCloser capability.
+			if response.StatusCode != http.StatusSwitchingProtocols {
+				response.Body = &errorBody{ReadCloser: response.Body, onError: func() { upstreamFailed.Store(true) }}
+			}
+			return response, nil
+		}),
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			if r.Context().Err() != nil {
+				return
+			}
+			slog.Error("upstream error", "route", route.Prefix, "backend", backend.target.Host, "error", err, "request_id", r.Header.Get("X-Request-ID"))
+			httpio.WriteError(w, req, http.StatusBadGateway, "BAD_GATEWAY", "Bad gateway")
+		},
+	}
+	rp.ServeHTTP(w, req)
+	completed = true
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

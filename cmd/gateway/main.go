@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -135,6 +136,7 @@ func main() {
 		slog.Error("drain deadline reached", "error", err)
 		_ = server.Close()
 	}
+	activeHandler.Drain()
 	if err := management.Shutdown(ctx); err != nil {
 		_ = management.Close()
 	}
@@ -169,9 +171,43 @@ func readinessHandler(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-type handlerValue struct{ handler http.Handler }
+type handlerValue struct{ handler *drainingHandler }
 
 type swappableHandler struct{ current atomic.Value }
+
+type drainingHandler struct {
+	next      http.Handler
+	active    atomic.Int64
+	draining  atomic.Bool
+	closeOnce sync.Once
+}
+
+func newDrainingHandler(next http.Handler) *drainingHandler { return &drainingHandler{next: next} }
+
+func (h *drainingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.active.Add(1)
+	defer func() {
+		if h.active.Add(-1) == 0 && h.draining.Load() {
+			h.close()
+		}
+	}()
+	h.next.ServeHTTP(w, r)
+}
+
+func (h *drainingHandler) Drain() {
+	h.draining.Store(true)
+	if h.active.Load() == 0 {
+		h.close()
+	}
+}
+
+func (h *drainingHandler) close() {
+	h.closeOnce.Do(func() {
+		if closer, ok := h.next.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	})
+}
 
 func newSwappableHandler(initial http.Handler) *swappableHandler {
 	h := &swappableHandler{}
@@ -179,10 +215,24 @@ func newSwappableHandler(initial http.Handler) *swappableHandler {
 	return h
 }
 
-func (h *swappableHandler) Store(next http.Handler) { h.current.Store(handlerValue{handler: next}) }
+func (h *swappableHandler) Store(next http.Handler) {
+	old := h.current.Swap(handlerValue{handler: newDrainingHandler(next)})
+	if old != nil {
+		old.(handlerValue).handler.Drain()
+	}
+}
 func (h *swappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.current.Load().(handlerValue).handler.ServeHTTP(w, r)
 }
+
+func (h *swappableHandler) Drain() { h.current.Load().(handlerValue).handler.Drain() }
+
+type gatewayHandler struct {
+	http.Handler
+	close func()
+}
+
+func (h *gatewayHandler) Close() { h.close() }
 
 func buildGatewayHandler(cfg *config.Config, routes []config.RouteConfig) (http.Handler, *routing.Table, error) {
 	if len(routes) == 0 {
@@ -196,17 +246,21 @@ func buildGatewayHandler(cfg *config.Config, routes []config.RouteConfig) (http.
 	proxyRoutes := make([]proxy.Route, 0, len(routes))
 	for _, route := range routes {
 		routingRoutes = append(routingRoutes, routing.Route{Prefix: route.Prefix, Role: route.Role})
-		proxyRoutes = append(proxyRoutes, proxy.Route{Prefix: route.Prefix, Target: route.Target, Role: route.Role})
+		proxyRoutes = append(proxyRoutes, proxy.Route{
+			Prefix: route.Prefix, Target: route.Target, Backends: route.Backends,
+			Balance: route.Balance, HealthCheckPath: route.HealthCheckPath,
+			HealthCheckIntervalSeconds: route.HealthCheckIntervalSeconds, Role: route.Role,
+		})
 	}
 	table, err := routing.NewTable(routingRoutes)
 	if err != nil {
 		return nil, nil, err
 	}
-	proxyHandler, err := proxy.NewHandler(proxyRoutes, proxy.UpstreamTransport())
+	proxyHandler, err := proxy.NewManagedHandler(proxyRoutes, proxy.UpstreamTransport())
 	if err != nil {
 		return nil, nil, err
 	}
-	return newGatewayHandlerFor(cfg, table, proxyHandler), table, nil
+	return &gatewayHandler{Handler: newGatewayHandlerFor(cfg, table, proxyHandler), close: proxyHandler.Close}, table, nil
 }
 
 // reloadGatewayHandler publishes a fully validated replacement only after all

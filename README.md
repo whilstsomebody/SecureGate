@@ -20,7 +20,7 @@ The project is moving toward a lightweight, reverse-proxy-only core. Authenticat
 | **Standardized JSON Errors** | Consistent structured error envelope (`code`, `message`, `status`, `request_id`) across all middleware and proxy failures |
 | **X-Request-ID** | Validated or generated on middleware-handled requests; echoed in response and error envelopes |
 | **Structured Logging** | Opt-in JSON access logs, normalized route/method fields, bounded string values |
-| **Prometheus Metrics** | 13 operational metrics covering request rate, latency, upstream duration, active sockets/requests/upgrades, admission rejections, timeouts, and breaker states |
+| **Prometheus Metrics** | 15 operational metrics covering request rate, latency, backend health and load, active sockets/requests/upgrades, admission rejections, timeouts, and breaker states |
 | **Grafana Provisioning** | Auto-provisioned Prometheus datasource and comprehensive "SecureGate Overview" dashboard |
 | **Health Endpoints** | Private management listener: `/health` for liveness, `/ready` for Redis readiness |
 | **Graceful Shutdown** | SIGINT/SIGTERM handled; configurable drain budget (10 seconds by default) |
@@ -140,13 +140,22 @@ Set `ROUTES_FILE` to a JSON document containing every public route:
 ```json
 {
   "routes": [
-    {"prefix": "/catalog", "target": "http://catalog:8080", "role": "USER"},
+    {
+      "prefix": "/catalog",
+      "backends": ["http://catalog-a:8080", "http://catalog-b:8080"],
+      "balance": "least_connections",
+      "health_check_path": "/healthz",
+      "health_check_interval_seconds": 5,
+      "role": "USER"
+    },
     {"prefix": "/billing/v1", "target": "http://billing:8080", "role": "ADMIN"}
   ]
 }
 ```
 
-Prefixes are decoded, segment-safe mounts: they must start with `/`, cannot be `/` or end in `/`, and cannot contain empty, `.` or `..` segments. The longest matching mount is selected, so `/catalog/admin` can safely coexist with `/catalog`. Every prefix must be unique and every target follows the upstream URL rules above. When `AUTH_ENABLED=true`, every route must specify a role.
+Prefixes are decoded, segment-safe mounts: they must start with `/`, cannot be `/` or end in `/`, and cannot contain empty, `.` or `..` segments. The longest matching mount is selected, so `/catalog/admin` can safely coexist with `/catalog`. Every prefix must be unique and every backend follows the upstream URL rules above. When `AUTH_ENABLED=true`, every route must specify a role.
+
+For backward compatibility, a route can still use one `target`. A route must use either `target` or a non-empty `backends` list. Pools default to `round_robin`; set `balance` to `least_connections` to send each request to the eligible backend with the fewest active requests. Explicit pools receive immediate and periodic `GET` checks (default path `/health`, default interval 5 seconds); only `2xx` and `3xx` responses are healthy. A route with a single `target` keeps its existing passive behavior unless a health-check path or interval is set. Failed checks and open per-backend circuit breakers remove a backend from selection. During reload, the previous pool drains: it accepts no new selections but lets assigned requests finish before its health workers stop.
 
 After atomically replacing the file, send the gateway `SIGHUP` (`kill -HUP <pid>`). SecureGate reads and validates the full file, builds a complete replacement handler, and swaps it only if validation succeeds. Existing requests keep the route set they started with; new requests use the new set. A failed reload is logged and leaves the active routes unchanged. Route reload changes forwarding, RBAC, rate-limit labels, access-log labels, and proxy metrics together. Listener, TLS, Redis, and timeout settings still require a restart.
 
@@ -419,7 +428,9 @@ The gateway's outer Go `ServeMux` still applies its normal redirects for literal
 | `securegate_active_upgrades` | Gauge | — | Current active upgraded/hijacked WebSocket connections |
 | `securegate_upstream_duration_seconds` | Histogram | `route` | Upstream roundtrip response duration (excluding client body read) |
 | `securegate_timeouts_total` | Counter | `type` | Total timeout events (`upstream_dial`, `upstream_header`, `upstream_read_idle`, `client_read_idle`, `client_write`) |
-| `securegate_circuit_breaker_state` | Gauge | `route` | Circuit breaker status: `0` = CLOSED (healthy), `1` = OPEN (tripped), `2` = HALF_OPEN (probing) |
+| `securegate_circuit_breaker_state` | Gauge | `route`, `backend` | Circuit breaker status: `0` = CLOSED (healthy), `1` = OPEN (tripped), `2` = HALF_OPEN (probing) |
+| `securegate_backend_healthy` | Gauge | `route`, `backend` | Active health-check result: `1` = healthy, `0` = unhealthy |
+| `securegate_backend_active_requests` | Gauge | `route`, `backend` | Requests currently assigned to each backend |
 | `securegate_build_info` | Gauge | `version`, `commit`, `go_version` | Constant gauge (1) exposing running binary build information |
 
 Metric `path` values for proxied traffic are bounded configured-route labels (or `unmatched`), never raw URLs. Nonstandard methods use `OTHER`.
@@ -557,7 +568,7 @@ All items from the **Practical Improvements** milestone are complete:
 1. ✅ One-command demo stack (`make demo` / `make docker-demo`).
 2. ✅ `check-config` pre-flight validation command.
 3. ✅ Real Redis integration test suite and CI service containers.
-4. ✅ 13 operational Prometheus metrics (rejections, active sockets/requests/upgrades, upstream latency, timeouts, breaker states, build info).
+4. ✅ 15 operational Prometheus metrics (rejections, backend health/load, active sockets/requests/upgrades, upstream latency, timeouts, breaker states, build info).
 5. ✅ Automatically provisioned Grafana data source and "SecureGate Overview" dashboard.
 6. ✅ Consistent JSON error responses and documented retry behavior.
 7. ✅ End-to-end operational smoke tests (`make smoke` and `scripts/smoke_test.sh`).
@@ -569,7 +580,7 @@ All items from the **Practical Improvements** milestone are complete:
 With practical improvements in place, the project will move to the larger architectural milestones:
 1. ✅ **Extract proxy core**: Reverse-proxy forwarding now accepts explicit startup route definitions and can run without JWT, RBAC, Redis, or rate limiting through proxy-only mode.
 2. ✅ **Dynamic routes & reload**: JSON route definitions, segment-safe longest-prefix routing, and validated atomic `SIGHUP` reloads that preserve in-flight requests.
-3. **Backend pools & load balancing**: Health tracking, active drain, round-robin, and least-connections routing.
+3. ✅ **Backend pools & load balancing**: Validated backend pools with active health checks, per-backend circuit breaking, round-robin or least-connections selection, and reload-time draining.
 4. **Explicit trusted-proxy configuration**: Safe forwarding header evaluation for multi-tier proxy topologies.
 5. **TLS termination**: Native HTTPS termination support.
 6. **Comparative benchmarks**: Rigorous performance, latency, and resource benchmarking against nginx.

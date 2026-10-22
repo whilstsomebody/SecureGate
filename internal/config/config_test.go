@@ -119,6 +119,27 @@ func TestRoutesFileOverridesLegacyRoutesAndReloads(t *testing.T) {
 	}
 }
 
+func TestRouteBackendPoolValidation(t *testing.T) {
+	valid := []RouteConfig{{
+		Prefix: "/catalog", Backends: []string{"https://catalog-a.example", "https://catalog-b.example"},
+		Balance: "least_connections", HealthCheckPath: "/healthz", HealthCheckIntervalSeconds: 10,
+	}}
+	if _, err := loadRoutes("", valid, false); err != nil {
+		t.Fatalf("valid backend pool rejected: %v", err)
+	}
+	for _, route := range []RouteConfig{
+		{Prefix: "/catalog", Target: "https://catalog.example", Backends: []string{"https://catalog-b.example"}},
+		{Prefix: "/catalog", Backends: []string{"https://catalog.example", "https://catalog.example"}},
+		{Prefix: "/catalog", Backends: []string{"https://catalog.example"}, Balance: "random"},
+		{Prefix: "/catalog", Backends: []string{"https://catalog.example"}, HealthCheckPath: "health"},
+		{Prefix: "/catalog", Backends: []string{"https://catalog.example"}, HealthCheckIntervalSeconds: 3601},
+	} {
+		if _, err := loadRoutes("", []RouteConfig{route}, false); err == nil {
+			t.Fatalf("invalid pool accepted: %#v", route)
+		}
+	}
+}
+
 func TestValidEnvironmentOverrides(t *testing.T) {
 	env := map[string]string{
 		"JWT_SECRET": "test-secret", "JWT_ISSUER": "issuer", "JWT_AUDIENCE": "audience",
