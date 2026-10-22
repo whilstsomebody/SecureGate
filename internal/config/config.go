@@ -17,6 +17,7 @@ import (
 )
 
 type Config struct {
+	AccessLogEnabled    bool
 	JWTSecret           string
 	JWTIssuer           string
 	JWTAudience         string
@@ -84,6 +85,11 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 			return nil, fmt.Errorf("%s: must not be blank", setting.key)
 		}
 	}
+	accessLog, err := strconv.ParseBool(value("ACCESS_LOG_ENABLED", "false"))
+	if err != nil {
+		return nil, errors.New("ACCESS_LOG_ENABLED: must be a boolean")
+	}
+	cfg.AccessLogEnabled = accessLog
 	count, err := strconv.Atoi(value("RATE_LIMIT_COUNT", "5"))
 	if err != nil || count <= 0 {
 		return nil, errors.New("RATE_LIMIT_COUNT: must be a positive integer within the platform int range")

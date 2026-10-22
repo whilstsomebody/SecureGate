@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/whilstsomebody/securegate/internal/httpio"
+	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
 func RecoveryMiddleware(next http.Handler) http.Handler {
@@ -17,8 +18,8 @@ func RecoveryMiddleware(next http.Handler) http.Handler {
 				}
 				slog.Error("panic recovered",
 					"error", rec,
-					"method", r.Method,
-					"path", r.URL.Path,
+					"method", metrics.MethodLabel(r.Method),
+					"route", metrics.RouteLabel(r.URL.Path),
 					"request_id", r.Header.Get(RequestIDHeader),
 				)
 				if recorder.Committed {

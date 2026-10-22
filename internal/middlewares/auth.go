@@ -83,7 +83,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		if !isAuthorized(r.URL.Path, role) {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "rbac_forbidden").Inc()
-			slog.Warn("access forbidden", "path", r.URL.Path, "role", role, "request_id", requestID)
+			slog.Debug("access forbidden", "route", metrics.RouteLabel(r.URL.Path), "request_id", requestID)
 			http.Error(w, "Access forbidden: Insufficient role permission", http.StatusForbidden)
 			return
 		}

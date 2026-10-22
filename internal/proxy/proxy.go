@@ -13,6 +13,7 @@ import (
 
 	"github.com/whilstsomebody/securegate/internal/circuitbreaker"
 	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
@@ -90,7 +91,7 @@ func newProxyHandler(transport http.RoundTripper) http.Handler {
 				if r.Context().Err() != nil {
 					return
 				}
-				slog.Error("upstream error", "path", r.URL.Path, "error", err, "request_id", r.Header.Get("X-Request-ID"))
+				slog.Error("upstream error", "route", metrics.RouteLabel(r.URL.Path), "error", err, "request_id", r.Header.Get("X-Request-ID"))
 				http.Error(w, "Bad gateway", http.StatusBadGateway)
 			},
 		}

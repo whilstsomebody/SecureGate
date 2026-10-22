@@ -3,6 +3,7 @@ package middlewares
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +44,28 @@ func TestRequestIDMiddlewarePreservesExistingID(t *testing.T) {
 	}
 	if rr.Header().Get(RequestIDHeader) != existing {
 		t.Errorf("expected response to echo %q", existing)
+	}
+}
+
+func TestInvalidRequestIDsAreReplaced(t *testing.T) {
+	for _, id := range []string{strings.Repeat("a", 129), "a b", "x\ny", "🚀", "a,b"} {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Header.Set(RequestIDHeader, id)
+		rr := httptest.NewRecorder()
+		RequestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.Header.Get(RequestIDHeader); got == id || !validRequestID(got) {
+				t.Fatalf("invalid ID forwarded: %q", got)
+			}
+		})).ServeHTTP(rr, req)
+		if !validRequestID(rr.Header().Get(RequestIDHeader)) {
+			t.Fatal("invalid echoed ID")
+		}
+	}
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header[RequestIDHeader] = []string{"first", "second"}
+	rr := httptest.NewRecorder()
+	RequestIDMiddleware(http.NotFoundHandler()).ServeHTTP(rr, req)
+	if rr.Header().Get(RequestIDHeader) == "first" {
+		t.Fatal("ambiguous ID preserved")
 	}
 }

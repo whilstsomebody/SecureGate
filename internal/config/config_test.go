@@ -25,8 +25,9 @@ func TestEnvironmentDefaults(t *testing.T) {
 
 func TestInvalidEnvironment(t *testing.T) {
 	cases := map[string][]string{
-		"JWT_SECRET": {"", " \t"},
-		"JWT_ISSUER": {" \t"}, "JWT_AUDIENCE": {" \t"},
+		"ACCESS_LOG_ENABLED": {"typo"},
+		"JWT_SECRET":         {"", " \t"},
+		"JWT_ISSUER":         {" \t"}, "JWT_AUDIENCE": {" \t"},
 		"RATE_LIMIT_COUNT":          {"abc", "0", "-1", "1.5", " 5", "9999999999999999999999999"},
 		"RATE_LIMIT_WINDOW_SECONDS": {"abc", "0", "-1", "1.5", "9223372037", "18446744074", "9223372036854775808"},
 		"REDIS_ADDR":                {"localhost", ":6379", "redis://localhost:6379", "localhost:0", "localhost:65536", "localhost:http", "localhost:+12", "bad host:6379", "::1:6379", "[localhost]:6379"},
@@ -83,7 +84,7 @@ func TestValidEnvironmentOverrides(t *testing.T) {
 
 func TestLoadPublishesOnlyValidConfiguration(t *testing.T) {
 	t.Chdir(t.TempDir())
-	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT", "MANAGEMENT_ADDR"} {
+	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT", "MANAGEMENT_ADDR", "ACCESS_LOG_ENABLED"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("JWT_SECRET", "test-secret")

@@ -6,11 +6,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
 func MetricsMiddleware(next http.Handler) http.Handler {
+	accessLog := config.Cfg != nil && config.Cfg.AccessLogEnabled
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		path := r.URL.Path
@@ -27,7 +29,9 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 			if panicValue != nil {
 				metrics.ResponseAborts.WithLabelValues(route).Inc()
 			}
-			slog.Info("request", "method", r.Method, "path", path, "status", status, "aborted", panicValue != nil, "duration_ms", time.Since(start).Milliseconds(), "request_id", r.Header.Get(RequestIDHeader))
+			if accessLog {
+				slog.Info("request", "method", metrics.MethodLabel(r.Method), "route", route, "status", status, "aborted", panicValue != nil, "duration_ms", time.Since(start).Milliseconds(), "request_id", r.Header.Get(RequestIDHeader))
+			}
 			if panicValue != nil {
 				panic(panicValue)
 			}

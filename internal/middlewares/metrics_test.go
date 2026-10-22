@@ -1,10 +1,14 @@
 package middlewares
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"github.com/whilstsomebody/securegate/internal/config"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,4 +87,30 @@ func TestMetricsRecordAbortAndPropagateIt(t *testing.T) {
 		w.Write([]byte("partial"))
 		panic(http.ErrAbortHandler)
 	}))).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/users/x", nil))
+}
+
+func TestAccessLogCanBeDisabledWithoutDisablingMetrics(t *testing.T) {
+	originalCfg, originalLogger := config.Cfg, slog.Default()
+	t.Cleanup(func() { config.Cfg = originalCfg; slog.SetDefault(originalLogger) })
+	for _, enabled := range []bool{false, true} {
+		cfg := *originalCfg
+		cfg.AccessLogEnabled = enabled
+		config.Cfg = &cfg
+		var out bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&out, nil)))
+		metrics.RequestCount.Reset()
+		MetricsMiddleware(http.NotFoundHandler()).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/users/private-path", nil))
+		if (out.Len() > 0) != enabled {
+			t.Fatalf("access logging enabled=%v output=%s", enabled, out.String())
+		}
+		if strings.Contains(out.String(), "private-path") {
+			t.Fatal("raw path logged")
+		}
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(metrics.RequestCount)
+		families, err := reg.Gather()
+		if err != nil || len(families) != 1 {
+			t.Fatal("metrics missing")
+		}
+	}
 }

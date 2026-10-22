@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/httpio"
+	"github.com/whilstsomebody/securegate/internal/logging"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/middlewares"
 	"github.com/whilstsomebody/securegate/internal/proxy"
@@ -23,7 +24,7 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(logging.NewHandler(os.Stdout)))
 
 	cfg, err := config.Load()
 	if err != nil {

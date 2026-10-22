@@ -131,6 +131,7 @@ SecureGate/
 | `USER_SERVICE_ADDR` | `http://localhost:9001` | User service base URL |
 | `ADMIN_SERVICE_ADDR` | `http://localhost:9003` | Admin service base URL |
 | `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Payments service base URL |
+| `ACCESS_LOG_ENABLED` | `false` | Enable per-request JSON access logs; metrics remain enabled |
 | `MANAGEMENT_ADDR` | `127.0.0.1:9000` | Separate management listener; restrict network access when overriding |
 | `GATEWAY_PORT` | `:8080` | Listen address, `host:port` or `:port` |
 
@@ -336,3 +337,9 @@ Tests cover: circuit breaker state transitions, auth middleware (missing token, 
 `/metrics`, `/health`, and `/ready` are served only on `MANAGEMENT_ADDR` (default `127.0.0.1:9000`); the public proxy returns 404 for these paths. `/health` is process liveness and never calls Redis. `/ready` checks Redis within 500 ms, with at most two concurrent checks. Management has its own 32-connection and 8-request limits; scrapes are limited to two concurrent requests. Only GET and HEAD are accepted.
 
 Update monitoring and probes to port 9000. Docker-hosted Prometheus needs an explicitly reachable management bind address and firewall restrictions; the default loopback bind is intentionally private. These endpoints have no application authentication, so expose them only to your monitoring network.
+
+### Request IDs and logging
+
+Incoming request IDs are accepted only as a single header value of 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`; all other IDs are replaced with a generated ID before forwarding and echoing. IDs are correlation labels, not trusted identities.
+
+Access logs are disabled by default; set `ACCESS_LOG_ENABLED=true` to enable synchronous JSON request logging. Request logs identify the route and normalized method rather than the full URL. Metrics remain enabled regardless. Routine 403/429 outcomes are counted in metrics without warning logs; operational failures remain logged. Structured string/error values are truncated after 1024 bytes to bound individual log records. Slow log sinks can still delay requests when logging is enabled.
