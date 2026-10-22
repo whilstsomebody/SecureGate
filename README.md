@@ -10,7 +10,7 @@ SecureGate is a production-style **API Gateway** built in Go, designed to secure
 
 | Feature | Details |
 |---|---|
-| **JWT Authentication** | HS256 validation; every token carries a `jti` claim |
+| **JWT Authentication** | HS256 only; required expiration, issuer, audience, and nonempty token ID (`jti`) |
 | **RBAC Authorization** | Prefix-based role enforcement (USER / ADMIN) |
 | **Revocation checks** | Existing Redis revocations are enforced; lookup failures return 503. Token management belongs to an external identity service. |
 | **Redis Rate Limiting** | Atomic Lua script; per-client IP window (configurable) |
@@ -123,6 +123,8 @@ SecureGate/
 | Variable | Default | Description |
 |---|---|---|
 | `JWT_SECRET` | *(required)* | HMAC secret for JWT signing and validation |
+| `JWT_ISSUER` | `securegate` | Required token issuer (`iss`), exact match |
+| `JWT_AUDIENCE` | `securegate-api` | Required token audience (`aud`), string or array containing this value |
 | `REDIS_ADDR` | `127.0.0.1:6379` | Redis address |
 | `RATE_LIMIT_COUNT` | `5` | Max requests per window per IP |
 | `RATE_LIMIT_WINDOW_SECONDS` | `10` | Window size in seconds |
@@ -214,6 +216,10 @@ make docker-down  # stop containers
 ## Usage
 
 ### Generate a JWT token
+
+Tokens must use HS256 and include a valid `exp`, matching `iss` and `aud`, a nonblank string `jti`, and the route’s required `role`. Every accepted token undergoes a revocation lookup; unavailable Redis fails closed. The CLI uses the same issuer and audience settings as the gateway.
+
+**Compatibility:** older tokens without issuer or audience are rejected. Regenerate them with the CLI below, or update your issuer to supply these claims.
 
 ```bash
 make token              # USER token

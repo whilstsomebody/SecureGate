@@ -1,7 +1,6 @@
 package middlewares
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -44,14 +43,15 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		tokenString := parts[1]
-		secret := config.Cfg.JWTSecret
-
+		cfg := config.Cfg
+		if cfg == nil || cfg.JWTSecret == "" || strings.TrimSpace(cfg.JWTIssuer) == "" || strings.TrimSpace(cfg.JWTAudience) == "" {
+			http.Error(w, "Authentication service unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-			}
-			return []byte(secret), nil
-		})
+			return []byte(cfg.JWTSecret), nil
+		}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired(),
+			jwt.WithIssuer(cfg.JWTIssuer), jwt.WithAudience(cfg.JWTAudience))
 
 		if err != nil || !token.Valid {
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_or_expired_token").Inc()
@@ -73,19 +73,23 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check revocation list if the token carries a JTI.
-		if jti, _ := claims["jti"].(string); jti != "" {
-			revoked, err := ratelimit.IsRevoked(jti)
-			if err != nil {
-				slog.Error("revocation check failed", "error", err, "request_id", requestID)
-				metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "revocation_unavailable").Inc()
-				http.Error(w, "Authentication service unavailable", http.StatusServiceUnavailable)
-				return
-			} else if revoked {
-				metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "token_revoked").Inc()
-				http.Error(w, "Token has been revoked", http.StatusUnauthorized)
-				return
-			}
+		jti, ok := claims["jti"].(string)
+		if !ok || strings.TrimSpace(jti) == "" {
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "invalid_token_claims").Inc()
+			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			return
+		}
+
+		revoked, err := ratelimit.IsRevoked(jti)
+		if err != nil {
+			slog.Error("revocation check failed", "error", err, "request_id", requestID)
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "revocation_unavailable").Inc()
+			http.Error(w, "Authentication service unavailable", http.StatusServiceUnavailable)
+			return
+		} else if revoked {
+			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "token_revoked").Inc()
+			http.Error(w, "Token has been revoked", http.StatusUnauthorized)
+			return
 		}
 
 		if !isAuthorized(r.URL.Path, role) {

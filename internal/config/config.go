@@ -12,6 +12,8 @@ import (
 
 type Config struct {
 	JWTSecret           string
+	JWTIssuer           string
+	JWTAudience         string
 	RedisAddr           string
 	RateLimitCount      int
 	RateLimitWindow     time.Duration
@@ -32,6 +34,8 @@ func Load() *Config {
 
 	cfg := &Config{
 		JWTSecret:           mustGetenv("JWT_SECRET"),
+		JWTIssuer:           GetJWTIssuer(),
+		JWTAudience:         GetJWTAudience(),
 		RedisAddr:           getenvOrDefault("REDIS_ADDR", "127.0.0.1:6379"),
 		RateLimitCount:      getenvIntOrDefault("RATE_LIMIT_COUNT", 5),
 		RateLimitWindow:     time.Duration(getenvIntOrDefault("RATE_LIMIT_WINDOW_SECONDS", 10)) * time.Second,
@@ -83,3 +87,7 @@ func getenvIntOrDefault(key string, fallback int) int {
 	}
 	return fallback
 }
+
+// GetJWTIssuer and GetJWTAudience share the gateway policy with the token CLI.
+func GetJWTIssuer() string   { return getenvOrDefault("JWT_ISSUER", "securegate") }
+func GetJWTAudience() string { return getenvOrDefault("JWT_AUDIENCE", "securegate-api") }

@@ -20,22 +20,25 @@ func main() {
 		role = os.Args[1]
 	}
 
-	claims := jwt.MapClaims{
-		"user": "aman",
-		"role": role,
-		"jti":  newJTI(),
-		"exp":  time.Now().Add(time.Hour).Unix(),
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	signedToken, err := token.SignedString([]byte(secret))
+	signedToken, err := generateToken(secret, config.GetJWTIssuer(), config.GetJWTAudience(), role)
 	if err != nil {
 		panic(err)
 	}
 
 	fmt.Println("\nYour JWT Token:")
 	fmt.Println(signedToken)
+}
+
+func generateToken(secret, issuer, audience, role string) (string, error) {
+	claims := jwt.MapClaims{
+		"user": "aman",
+		"role": role,
+		"jti":  newJTI(),
+		"exp":  time.Now().Add(time.Hour).Unix(),
+		"iss":  issuer,
+		"aud":  audience,
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }
 
 func newJTI() string {
