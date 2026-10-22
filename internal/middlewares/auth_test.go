@@ -145,7 +145,7 @@ func TestAuthMiddlewareValidToken(t *testing.T) {
 	}
 }
 
-func TestAuthMiddlewarePublicPathsSkipAuth(t *testing.T) {
+func TestAuthMiddlewareDoesNotBypassManagementPaths(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := AuthMiddleware(inner)
 
@@ -154,8 +154,8 @@ func TestAuthMiddlewarePublicPathsSkipAuth(t *testing.T) {
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 
-		if rr.Code != http.StatusOK {
-			t.Errorf("expected public path %s to skip auth, got %d", path, rr.Code)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("expected path %s to require auth, got %d", path, rr.Code)
 		}
 	}
 }

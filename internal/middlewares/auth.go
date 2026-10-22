@@ -13,20 +13,9 @@ import (
 	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
-// publicPaths bypass authentication entirely (Prometheus scrape, health probe).
-var publicPaths = map[string]bool{
-	"/metrics": true,
-	"/health":  true,
-}
-
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get(RequestIDHeader)
-
-		if publicPaths[r.URL.Path] {
-			next.ServeHTTP(w, r)
-			return
-		}
 
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {

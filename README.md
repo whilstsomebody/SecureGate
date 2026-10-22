@@ -131,6 +131,7 @@ SecureGate/
 | `USER_SERVICE_ADDR` | `http://localhost:9001` | User service base URL |
 | `ADMIN_SERVICE_ADDR` | `http://localhost:9003` | Admin service base URL |
 | `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Payments service base URL |
+| `MANAGEMENT_ADDR` | `127.0.0.1:9000` | Separate management listener; restrict network access when overriding |
 | `GATEWAY_PORT` | `:8080` | Listen address, `host:port` or `:port` |
 
 Configuration is validated before Redis initialization or opening the gateway listener. Invalid values stop startup with an error naming the setting. Missing or empty optional environment variables use the defaults above; whitespace-only JWT settings and malformed numeric settings are rejected. `JWT_SECRET` must be nonblank. Defaults no longer hide numeric typos, and duration overflow is rejected.
@@ -249,7 +250,7 @@ curl -H "Authorization: Bearer <TOKEN>" http://localhost:8080/payments/checkout
 ### Health check
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:9000/health
 # {"status":"ok","redis":"ok"}
 ```
 
@@ -305,7 +306,7 @@ Metric `path` values are bounded route labels (`/users`, `/payments`, `/admin`, 
 Circuit breakers count each upstream attempt once, including truncated response bodies. Client cancellations do not mark an upstream unhealthy. Only one recovery probe is allowed at a time, and stale completions cannot close a newly opened breaker. Response middleware preserves flushing and connection upgrades.
 
 - Prometheus UI: `http://localhost:9090`
-- Metrics endpoint: `http://localhost:8080/metrics`
+- Metrics endpoint: `http://localhost:9000/metrics`
 - Grafana: `http://localhost:3000` (admin / admin → add Prometheus datasource `http://prometheus:9090`)
 
 <img width="1536" height="1024" alt="grafana_prometheus" src="https://github.com/user-attachments/assets/61ca484d-b61f-4cbc-a9aa-21579f12a052" />
@@ -329,3 +330,9 @@ make test
 ```
 
 Tests cover: circuit breaker state transitions, auth middleware (missing token, bad format, expired, forbidden role, valid, public paths), rate limit middleware (IP extraction from all proxy headers, allow/block via stub), panic recovery, proxy path rewriting, and RBAC rules. No live Redis required.
+
+### Management listener migration
+
+`/metrics`, `/health`, and `/ready` are served only on `MANAGEMENT_ADDR` (default `127.0.0.1:9000`); the public proxy returns 404 for these paths. `/health` is process liveness and never calls Redis. `/ready` checks Redis within 500 ms, with at most two concurrent checks. Management has its own 32-connection and 8-request limits; scrapes are limited to two concurrent requests. Only GET and HEAD are accepted.
+
+Update monitoring and probes to port 9000. Docker-hosted Prometheus needs an explicitly reachable management bind address and firewall restrictions; the default loopback bind is intentionally private. These endpoints have no application authentication, so expose them only to your monitoring network.

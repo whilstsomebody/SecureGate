@@ -27,6 +27,7 @@ type Config struct {
 	AdminServiceAddr    string
 	PaymentsServiceAddr string
 	GatewayPort         string
+	ManagementAddr      string
 }
 
 // Cfg is the global config instance loaded at startup.
@@ -74,6 +75,7 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		AdminServiceAddr:    value("ADMIN_SERVICE_ADDR", "http://localhost:9003"),
 		PaymentsServiceAddr: value("PAYMENTS_SERVICE_ADDR", "http://localhost:9002"),
 		GatewayPort:         value("GATEWAY_PORT", ":8080"),
+		ManagementAddr:      value("MANAGEMENT_ADDR", "127.0.0.1:9000"),
 	}
 	for _, setting := range []struct{ key, value string }{
 		{"JWT_SECRET", cfg.JWTSecret}, {"JWT_ISSUER", cfg.JWTIssuer}, {"JWT_AUDIENCE", cfg.JWTAudience},
@@ -104,6 +106,9 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 	}
 	if !validAddress(cfg.GatewayPort, true) {
 		return nil, errors.New("GATEWAY_PORT: must be host:port or :port with port between 1 and 65535")
+	}
+	if !validAddress(cfg.ManagementAddr, false) {
+		return nil, errors.New("MANAGEMENT_ADDR: must be host:port with port between 1 and 65535")
 	}
 	return cfg, nil
 }

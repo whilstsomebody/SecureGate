@@ -83,7 +83,7 @@ func TestValidEnvironmentOverrides(t *testing.T) {
 
 func TestLoadPublishesOnlyValidConfiguration(t *testing.T) {
 	t.Chdir(t.TempDir())
-	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT"} {
+	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT", "MANAGEMENT_ADDR"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("JWT_SECRET", "test-secret")

@@ -52,6 +52,19 @@ func main() {
 	defer limited.CloseConnections()
 	defer proxy.CloseIdleConnections()
 
+	managementListener, err := net.Listen("tcp", cfg.ManagementAddr)
+	if err != nil {
+		log.Fatalf("management listen failed: %v", err)
+	}
+	managementLimited := httpio.LimitListener(managementListener, 32, 5*time.Second)
+	defer managementLimited.CloseConnections()
+	management := &http.Server{Handler: newManagementHandler(), ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 10 * time.Second, MaxHeaderBytes: 8 << 10}
+	go func() {
+		if err := management.Serve(managementLimited); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("management server failed: %v", err)
+		}
+	}()
+
 	go func() {
 		slog.Info("SecureGate starting", "port", cfg.GatewayPort)
 		if err := server.Serve(limited); err != nil && err != http.ErrServerClosed {
@@ -71,10 +84,13 @@ func main() {
 		slog.Error("drain deadline reached", "error", err)
 		_ = server.Close()
 	}
+	if err := management.Shutdown(ctx); err != nil {
+		_ = management.Close()
+	}
 	slog.Info("server exited cleanly")
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func readinessHandler(w http.ResponseWriter, r *http.Request) {
 	redisStatus := "ok"
 	httpStatus := http.StatusOK
 
@@ -97,9 +113,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func newHandler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Public endpoints — no auth required.
-	mux.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{MaxRequestsInFlight: 2, Timeout: 5 * time.Second}))
-	mux.HandleFunc("/health", healthHandler)
+	// Management endpoints are never served on the public listener.
+	for _, path := range []string{"/metrics", "/health", "/ready"} {
+		mux.HandleFunc(path, http.NotFound)
+	}
 	// Token management belongs to the identity service. Never read this body.
 	mux.HandleFunc("/auth/revoke", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "close")
@@ -121,4 +138,15 @@ func newHandler() http.Handler {
 	mux.Handle("/", secureHandler)
 
 	return middlewares.LimitRequests(mux, 256)
+}
+
+func newManagementHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{MaxRequestsInFlight: 2, Timeout: 5 * time.Second}))
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok"}`)
+	})
+	mux.Handle("GET /ready", middlewares.LimitRequests(http.HandlerFunc(readinessHandler), 2))
+	return middlewares.LimitRequests(mux, 8)
 }
