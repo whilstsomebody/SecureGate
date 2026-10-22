@@ -91,3 +91,70 @@ func TestPolicyFreeGatewayForwardsWithoutRedisOrAuthorization(t *testing.T) {
 		t.Fatalf("policy-free readiness = %d %q", rr.Code, rr.Body.String())
 	}
 }
+
+func TestPolicyFreeGatewayEndToEndWithRealUpstream(t *testing.T) {
+	receivedHeader := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"upstream":"handled"}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		AuthEnabled:         false,
+		RateLimitEnabled:    false,
+		UserServiceAddr:     upstream.URL,
+		AdminServiceAddr:    upstream.URL,
+		PaymentsServiceAddr: upstream.URL,
+		Limits:              config.DefaultLimits(),
+	}
+
+	proxyHandler, err := newProxyHandler(cfg)
+	if err != nil {
+		t.Fatalf("newProxyHandler failed: %v", err)
+	}
+
+	gateway := newGatewayHandler(cfg, proxyHandler)
+
+	// 1. Unauthenticated request forwards directly and succeeds without requiring tokens or Redis
+	req := httptest.NewRequest(http.MethodGet, "/users/profile", nil)
+	rr := httptest.NewRecorder()
+	gateway.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"upstream":"handled"`) {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+
+	// 2. Request with arbitrary/invalid auth header is not blocked or rejected by gateway
+	req = httptest.NewRequest(http.MethodGet, "/users/profile", nil)
+	req.Header.Set("Authorization", "Bearer invalid-or-arbitrary-token")
+	rr = httptest.NewRecorder()
+	gateway.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if receivedHeader != "Bearer invalid-or-arbitrary-token" {
+		t.Fatalf("expected authorization header forwarded, got: %q", receivedHeader)
+	}
+
+	// 3. Burst requests are not rate limited
+	for i := 0; i < 10; i++ {
+		req = httptest.NewRequest(http.MethodGet, "/users/profile", nil)
+		rr = httptest.NewRecorder()
+		gateway.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("burst request %d rejected with %d", i+1, rr.Code)
+		}
+	}
+
+	// 4. Management readiness reports Redis disabled
+	rr = httptest.NewRecorder()
+	newManagementHandlerFor(cfg).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"redis":"disabled"`) {
+		t.Fatalf("expected redis disabled in readiness, got %d %s", rr.Code, rr.Body.String())
+	}
+}

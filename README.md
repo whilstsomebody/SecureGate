@@ -111,11 +111,11 @@ SecureGate/
 
 | Variable | Default | Description |
 |---|---|---|
-| `JWT_SECRET` | *(required)* | HMAC secret for JWT signing and validation |
+| `JWT_SECRET` | *(required when `AUTH_ENABLED=true`)* | HMAC secret for JWT signing and validation |
 | `JWT_ISSUER` | `securegate` | Required token issuer (`iss`), exact match |
 | `JWT_AUDIENCE` | `securegate-api` | Required token audience (`aud`), string or array containing this value |
 | `AUTH_ENABLED` | `true` | Apply JWT, revocation, and RBAC middleware; set `false` for proxy-only mode |
-| `REDIS_ADDR` | `127.0.0.1:6379` | Redis `host:port` address |
+| `REDIS_ADDR` | `127.0.0.1:6379` | Redis `host:port` address (required when auth or rate limiting is enabled) |
 | `RATE_LIMIT_ENABLED` | `true` | Apply Redis-backed peer-IP rate limiting |
 | `RATE_LIMIT_COUNT` | `5` | Positive integer; max requests per window per IP |
 | `RATE_LIMIT_WINDOW_SECONDS` | `10` | Integer window size, 1–9223372036 seconds |

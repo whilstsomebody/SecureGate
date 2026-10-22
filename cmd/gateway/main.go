@@ -130,6 +130,7 @@ func readinessHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !cfg.RequiresRedis() {
 			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
 			fmt.Fprint(w, `{"status":"ok","redis":"disabled"}`)
 			return
 		}
@@ -166,7 +167,14 @@ func newProxyHandler(cfg *config.Config) (http.Handler, error) {
 func newHandler() http.Handler {
 	cfg := config.Cfg
 	if cfg == nil {
-		return http.NotFoundHandler()
+		cfg = &config.Config{
+			AuthEnabled:         true,
+			RateLimitEnabled:    true,
+			UserServiceAddr:     "http://localhost:9001",
+			AdminServiceAddr:    "http://localhost:9003",
+			PaymentsServiceAddr: "http://localhost:9002",
+			Limits:              config.DefaultLimits(),
+		}
 	}
 	proxyHandler, err := newProxyHandler(cfg)
 	if err != nil {
@@ -192,10 +200,10 @@ func newGatewayHandler(cfg *config.Config, proxyHandler http.Handler) http.Handl
 
 	// Policies are optional. Observability and recovery always wrap the core.
 	handler := proxyHandler
-	if cfg.AuthEnabled {
+	if cfg != nil && cfg.AuthEnabled {
 		handler = middlewares.AuthMiddleware(handler)
 	}
-	if cfg.RateLimitEnabled {
+	if cfg != nil && cfg.RateLimitEnabled {
 		handler = middlewares.RateLimitMiddleware(handler)
 	}
 	handler = middlewares.RequestIDMiddleware(
@@ -205,7 +213,10 @@ func newGatewayHandler(cfg *config.Config, proxyHandler http.Handler) http.Handl
 	)
 	mux.Handle("/", handler)
 
-	limits := config.EffectiveLimits()
+	limits := config.DefaultLimits()
+	if cfg != nil && cfg.Limits.MaxConnections > 0 {
+		limits = cfg.Limits
+	}
 	return httpio.LimitRequestBodyReads(middlewares.LimitRequests(middlewares.LimitUpgrades(mux, limits.MaxUpgradeRequests), limits.MaxRequests), limits.ClientReadIdle)
 }
 
