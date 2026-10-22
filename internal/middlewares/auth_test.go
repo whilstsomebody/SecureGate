@@ -58,6 +58,10 @@ func TestIsAuthorized(t *testing.T) {
 		{"/payments/checkout", "ADMIN", true},
 		{"/payments/checkout", "USER", false},
 		{"/unknown", "ADMIN", false},
+		{"/usersanything", "USER", false},
+		{"/administrator", "ADMIN", false},
+		{"/payments-extra/x", "ADMIN", false},
+		{"/users/", "USER", true},
 	}
 	for _, tt := range tests {
 		got := isAuthorized(tt.path, tt.role)

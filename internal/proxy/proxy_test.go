@@ -27,6 +27,9 @@ func TestRewritePath(t *testing.T) {
 		{"/users", "/"},
 		{"/admin", "/"},
 		{"/unknown/path", "/unknown/path"},
+		{"/usersanything", "/usersanything"},
+		{"/admin-tools/x", "/admin-tools/x"},
+		{"/users/", "/"},
 	}
 	for _, tt := range tests {
 		got := rewritePath(tt.in)
@@ -46,6 +49,9 @@ func TestGetTargetService(t *testing.T) {
 		{"/admin/dashboard", "http://localhost:9003"},
 		{"/payments/checkout", "http://localhost:9002"},
 		{"/unknown", ""},
+		{"/usersanything", ""},
+		{"/payments-extra/x", ""},
+		{"/administrator", ""},
 		{"/", ""},
 	}
 	for _, tt := range tests {

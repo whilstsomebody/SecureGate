@@ -11,6 +11,7 @@ import (
 	"github.com/whilstsomebody/securegate/internal/config"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
+	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
 // publicPaths bypass authentication entirely (Prometheus scrape, health probe).
@@ -99,10 +100,6 @@ func AuthMiddleware(next http.Handler) http.Handler {
 }
 
 func isAuthorized(path string, userRole string) bool {
-	for routePrefix, requiredRole := range auth.RouteRoleMap {
-		if strings.HasPrefix(path, routePrefix) {
-			return userRole == requiredRole
-		}
-	}
-	return false
+	requiredRole, ok := auth.RouteRoleMap[routing.Prefix(path)]
+	return ok && userRole == requiredRole
 }

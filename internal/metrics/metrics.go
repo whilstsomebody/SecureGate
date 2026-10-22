@@ -2,9 +2,9 @@ package metrics
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
 var (
@@ -56,10 +56,8 @@ func RegisterMetrics() {
 // RouteLabel never includes caller-controlled suffixes or unmatched URLs.
 // Keep the path label name for compatibility; its values identify routes.
 func RouteLabel(path string) string {
-	for _, prefix := range []string{"/users", "/payments", "/admin"} {
-		if strings.HasPrefix(path, prefix) {
-			return prefix
-		}
+	if prefix := routing.Prefix(path); prefix != "" {
+		return prefix
 	}
 	switch path {
 	case "/health", "/metrics":

@@ -13,6 +13,7 @@ import (
 
 	"github.com/whilstsomebody/securegate/internal/circuitbreaker"
 	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/routing"
 )
 
 func NewProxyhandler() http.Handler {
@@ -35,13 +36,7 @@ func newProxyHandler(transport http.RoundTripper) http.Handler {
 			http.Error(w, "Invalid target URL", http.StatusInternalServerError)
 			return
 		}
-		var breaker *circuitbreaker.Breaker
-		for prefix, b := range breakers {
-			if strings.HasPrefix(r.URL.Path, prefix) {
-				breaker = b
-				break
-			}
-		}
+		breaker := breakers[routing.Prefix(r.URL.Path)]
 		finish, allowed := breaker.Acquire()
 		if !allowed {
 			http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
@@ -66,7 +61,7 @@ func newProxyHandler(transport http.RoundTripper) http.Handler {
 		}
 		rp := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
-				pr.Out.URL.Path = rewritePath(pr.In.URL.Path)
+				rewriteURLPath(pr.Out.URL)
 				pr.SetURL(targetURL)
 				pr.Out.Host = pr.In.Host
 				pr.SetXForwarded()
@@ -123,19 +118,19 @@ func (b *errorBody) Read(p []byte) (int, error) {
 
 func getTargetService(path string) string {
 	cfg := config.Cfg
-	if strings.HasPrefix(path, "/users") {
+	if routing.Prefix(path) == "/users" {
 		if cfg != nil {
 			return cfg.UserServiceAddr
 		}
 		return "http://localhost:9001"
 	}
-	if strings.HasPrefix(path, "/payments") {
+	if routing.Prefix(path) == "/payments" {
 		if cfg != nil {
 			return cfg.PaymentsServiceAddr
 		}
 		return "http://localhost:9002"
 	}
-	if strings.HasPrefix(path, "/admin") {
+	if routing.Prefix(path) == "/admin" {
 		if cfg != nil {
 			return cfg.AdminServiceAddr
 		}
@@ -145,13 +140,43 @@ func getTargetService(path string) string {
 }
 
 func rewritePath(path string) string {
-	for _, prefix := range []string{"/users", "/payments", "/admin"} {
-		if after, ok := strings.CutPrefix(path, prefix); ok {
-			if after == "" {
-				return "/"
-			}
-			return after
+	prefix := routing.Prefix(path)
+	if prefix == "" {
+		return path
+	}
+	after := strings.TrimPrefix(path, prefix)
+	if after == "" {
+		return "/"
+	}
+	return after
+}
+
+// rewriteURLPath strips the decoded mount from both URL representations.
+// The mount's separating slash is structural (even when written as %2F).
+// Escapes in the remaining suffix are kept byte-for-byte, including their case.
+func rewriteURLPath(u *url.URL) {
+	prefix := routing.Prefix(u.Path)
+	if prefix == "" {
+		return
+	}
+	escaped := u.EscapedPath()
+	// EscapedPath is a valid encoding of Path. Count decoded bytes so encoded
+	// characters within the mount do not cause us to cut the wrong raw prefix.
+	end := 0
+	for range len(prefix) {
+		if escaped[end] == '%' {
+			end += 3
+		} else {
+			end++
 		}
 	}
-	return path
+	suffix := escaped[end:]
+	if suffix == "" {
+		suffix = "/"
+	} else if suffix[0] == '%' {
+		// Prefix() guarantees this next decoded byte is the mount separator '/'.
+		suffix = "/" + suffix[3:]
+	}
+	u.Path = rewritePath(u.Path)
+	u.RawPath = suffix
 }
