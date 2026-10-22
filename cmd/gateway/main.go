@@ -84,6 +84,11 @@ func main() {
 		IdleTimeout:       limits.KeepAliveTimeout,
 		MaxHeaderBytes:    limits.MaxHeaderBytes,
 	}
+	tlsConfig, err := cfg.TLSConfig()
+	if err != nil {
+		log.Fatalf("invalid TLS configuration: %v", err)
+	}
+	server.TLSConfig = tlsConfig
 
 	listener, err := net.Listen("tcp", cfg.GatewayPort)
 	if err != nil {
@@ -107,8 +112,12 @@ func main() {
 	}()
 
 	go func() {
-		slog.Info("SecureGate starting", "version", version.Version, "port", cfg.GatewayPort)
-		if err := server.Serve(limited); err != nil && err != http.ErrServerClosed {
+		protocol := "http"
+		if cfg.TLSEnabled() {
+			protocol = "https"
+		}
+		slog.Info("SecureGate starting", "version", version.Version, "port", cfg.GatewayPort, "protocol", protocol)
+		if err := servePublic(server, limited, cfg.TLSEnabled()); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server failed: %v", err)
 		}
 	}()
@@ -141,6 +150,14 @@ func main() {
 		_ = management.Close()
 	}
 	slog.Info("server exited cleanly")
+}
+
+func servePublic(server *http.Server, listener net.Listener, tlsEnabled bool) error {
+	if tlsEnabled {
+		// TLSConfig already holds the validated certificate pair.
+		return server.ServeTLS(listener, "", "")
+	}
+	return server.Serve(listener)
 }
 
 func readinessHandler(cfg *config.Config) http.HandlerFunc {

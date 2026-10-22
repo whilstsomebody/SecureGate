@@ -125,6 +125,8 @@ SecureGate/
 | `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Legacy `/payments` service base URL, used only when `ROUTES_FILE` is unset |
 | `ACCESS_LOG_ENABLED` | `false` | Enable per-request JSON access logs; metrics remain enabled |
 | `TRUSTED_PROXY_CIDRS` | *(unset)* | Comma-separated canonical CIDRs allowed to supply `X-Forwarded-For`; unset means no forwarding headers are trusted |
+| `TLS_CERT_FILE` | *(unset)* | PEM certificate chain for HTTPS termination; requires `TLS_KEY_FILE` |
+| `TLS_KEY_FILE` | *(unset)* | PEM private key for HTTPS termination; requires `TLS_CERT_FILE` |
 | `MANAGEMENT_ADDR` | `127.0.0.1:9000` | Separate management listener; restrict network access when overriding |
 | `GATEWAY_PORT` | `:8080` | Listen address, `host:port` or `:port` |
 
@@ -392,6 +394,18 @@ TRUSTED_PROXY_CIDRS=10.0.0.0/8,192.0.2.0/24
 
 SecureGate accepts `X-Forwarded-For` only when the direct peer matches this allowlist. It evaluates the chain from right to left, skipping configured proxy networks and selecting the first untrusted address as the client. That same address is used for rate-limit keys and outbound `X-Real-IP`. Outbound `X-Forwarded-For` contains the validated chain plus SecureGate’s direct peer; `Forwarded` and spoofable forwarding fields are removed. Invalid chains fall back to the trusted peer. Use only private, controlled proxy networks; do not trust broad public ranges.
 
+### Native TLS termination
+
+Set both certificate paths to serve HTTPS on `GATEWAY_PORT`:
+
+```env
+TLS_CERT_FILE=/etc/securegate/tls/fullchain.pem
+TLS_KEY_FILE=/etc/securegate/tls/privkey.pem
+GATEWAY_PORT=:8443
+```
+
+SecureGate loads and validates the key pair before opening listeners; `securegate check-config` performs the same validation. TLS requires version 1.2 or newer. The public listener terminates TLS and forwards the original scheme as `X-Forwarded-Proto: https`; the separate management listener remains plain HTTP on `MANAGEMENT_ADDR`. Configure certificate renewal to restart SecureGate after replacing files.
+
 ### Rate limiting
 
 ```bash
@@ -593,6 +607,6 @@ With practical improvements in place, the project will move to the larger archit
 2. ✅ **Dynamic routes & reload**: JSON route definitions, segment-safe longest-prefix routing, and validated atomic `SIGHUP` reloads that preserve in-flight requests.
 3. ✅ **Backend pools & load balancing**: Validated backend pools with active health checks, per-backend circuit breaking, round-robin or least-connections selection, and reload-time draining.
 4. ✅ **Explicit trusted-proxy configuration**: CIDR-validated proxy allowlists, safe multi-tier `X-Forwarded-For` evaluation, consistent rate-limit identity, and sanitized upstream forwarding headers.
-5. **TLS termination**: Native HTTPS termination support.
+5. ✅ **TLS termination**: Optional native HTTPS on the public listener with startup certificate validation and TLS 1.2+ enforcement.
 6. **Comparative benchmarks**: Rigorous performance, latency, and resource benchmarking against nginx.
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,8 @@ type Config struct {
 	PaymentsServiceAddr string
 	GatewayPort         string
 	ManagementAddr      string
+	TLSCertFile         string
+	TLSKeyFile          string
 	TrustedProxyCIDRs   []netip.Prefix
 	trustedProxies      trustedproxy.Policy
 	RoutesFile          string
@@ -102,6 +105,8 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		PaymentsServiceAddr: value("PAYMENTS_SERVICE_ADDR", "http://localhost:9002"),
 		GatewayPort:         value("GATEWAY_PORT", ":8080"),
 		ManagementAddr:      value("MANAGEMENT_ADDR", "127.0.0.1:9000"),
+		TLSCertFile:         get("TLS_CERT_FILE"),
+		TLSKeyFile:          get("TLS_KEY_FILE"),
 		RoutesFile:          get("ROUTES_FILE"),
 	}
 	for _, feature := range []struct {
@@ -158,6 +163,9 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 	}
 	cfg.TrustedProxyCIDRs = trustedProxyCIDRs
 	cfg.trustedProxies = trustedproxy.New(trustedProxyCIDRs)
+	if _, err := cfg.TLSConfig(); err != nil {
+		return nil, err
+	}
 	// Preserve precise diagnostics for the legacy environment-based route
 	// settings. When ROUTES_FILE is configured it is the complete route source,
 	// so these values are intentionally ignored.
@@ -187,6 +195,30 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 		return nil, errors.New("MANAGEMENT_ADDR: must be host:port with port between 1 and 65535")
 	}
 	return cfg, nil
+}
+
+// TLSEnabled reports whether the public listener terminates HTTPS.
+func (c *Config) TLSEnabled() bool { return c != nil && c.TLSCertFile != "" && c.TLSKeyFile != "" }
+
+// TLSConfig loads the configured key pair and enforces modern TLS settings.
+// It returns nil when TLS is not configured.
+func (c *Config) TLSConfig() (*tls.Config, error) {
+	if c == nil || (c.TLSCertFile == "" && c.TLSKeyFile == "") {
+		return nil, nil
+	}
+	if c.TLSCertFile == "" || c.TLSKeyFile == "" {
+		return nil, errors.New("TLS_CERT_FILE and TLS_KEY_FILE must be set together")
+	}
+	certificate, err := tls.LoadX509KeyPair(c.TLSCertFile, c.TLSKeyFile)
+	if err != nil {
+		return nil, errors.New("TLS_CERT_FILE/TLS_KEY_FILE: unable to load certificate pair")
+	}
+	return &tls.Config{
+		MinVersion:       tls.VersionTLS12,
+		Certificates:     []tls.Certificate{certificate},
+		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
+		NextProtos:       []string{"h2", "http/1.1"},
+	}, nil
 }
 
 func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
@@ -417,6 +449,11 @@ func (c *Config) Summary() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Configuration syntax and values:\n")
 	fmt.Fprintf(&b, "  Gateway Listen:       %s\n", c.GatewayPort)
+	fmt.Fprintf(&b, "  TLS Termination:      %t\n", c.TLSEnabled())
+	if c.TLSEnabled() {
+		fmt.Fprintf(&b, "  TLS Certificate:      %s\n", c.TLSCertFile)
+		fmt.Fprintf(&b, "  TLS Private Key:      %s\n", c.TLSKeyFile)
+	}
 	fmt.Fprintf(&b, "  Management Listen:    %s\n", c.ManagementAddr)
 	fmt.Fprintf(&b, "  Redis Address:        %s\n", c.RedisAddr)
 	fmt.Fprintf(&b, "  Redis Required:       %t\n", c.RequiresRedis())

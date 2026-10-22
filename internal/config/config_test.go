@@ -1,6 +1,13 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +171,69 @@ func TestTrustedProxyCIDRValidation(t *testing.T) {
 	}
 }
 
+func TestTLSConfiguration(t *testing.T) {
+	certFile, keyFile := writeTestTLSKeyPair(t)
+	cfg := &Config{TLSCertFile: certFile, TLSKeyFile: keyFile}
+	tlsConfig, err := cfg.TLSConfig()
+	if err != nil || tlsConfig == nil || tlsConfig.MinVersion != 0x0303 || len(tlsConfig.Certificates) != 1 {
+		t.Fatalf("TLS configuration = %#v, %v", tlsConfig, err)
+	}
+	if len(tlsConfig.NextProtos) != 2 || tlsConfig.NextProtos[0] != "h2" || tlsConfig.NextProtos[1] != "http/1.1" {
+		t.Fatalf("NextProtos = %v", tlsConfig.NextProtos)
+	}
+	if !cfg.TLSEnabled() {
+		t.Fatal("TLS should be enabled")
+	}
+	loaded, err := fromEnvironment(func(key string) string {
+		switch key {
+		case "JWT_SECRET":
+			return "test-secret"
+		case "TLS_CERT_FILE":
+			return certFile
+		case "TLS_KEY_FILE":
+			return keyFile
+		}
+		return ""
+	})
+	if err != nil || !loaded.TLSEnabled() {
+		t.Fatalf("environment TLS configuration rejected: %#v, %v", loaded, err)
+	}
+	for _, invalid := range []*Config{{TLSCertFile: certFile}, {TLSKeyFile: keyFile}, {TLSCertFile: certFile, TLSKeyFile: certFile}} {
+		if _, err := invalid.TLSConfig(); err == nil {
+			t.Fatalf("invalid TLS configuration accepted: %#v", invalid)
+		}
+	}
+}
+
+func writeTestTLSKeyPair(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "securegate.test"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+		DNSNames: []string{"securegate.test"}, KeyUsage: x509.KeyUsageDigitalSignature,
+	}, &x509.Certificate{SerialNumber: big.NewInt(1)}, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
 func TestValidEnvironmentOverrides(t *testing.T) {
 	env := map[string]string{
 		"JWT_SECRET": "test-secret", "JWT_ISSUER": "issuer", "JWT_AUDIENCE": "audience",
@@ -189,7 +259,7 @@ func TestValidEnvironmentOverrides(t *testing.T) {
 
 func TestLoadPublishesOnlyValidConfiguration(t *testing.T) {
 	t.Chdir(t.TempDir())
-	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT", "MANAGEMENT_ADDR", "ACCESS_LOG_ENABLED", "TRUSTED_PROXY_CIDRS"} {
+	for _, key := range []string{"JWT_ISSUER", "JWT_AUDIENCE", "REDIS_ADDR", "RATE_LIMIT_COUNT", "RATE_LIMIT_WINDOW_SECONDS", "USER_SERVICE_ADDR", "ADMIN_SERVICE_ADDR", "PAYMENTS_SERVICE_ADDR", "GATEWAY_PORT", "MANAGEMENT_ADDR", "ACCESS_LOG_ENABLED", "TRUSTED_PROXY_CIDRS", "TLS_CERT_FILE", "TLS_KEY_FILE"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("JWT_SECRET", "test-secret")
@@ -250,14 +320,23 @@ func TestCheckAndSummary(t *testing.T) {
 	if !strings.Contains(summary, "Trusted Proxies:      none") {
 		t.Fatalf("summary missing unset trusted proxies: %s", summary)
 	}
+	if !strings.Contains(summary, "TLS Termination:      false") {
+		t.Fatalf("summary missing unset TLS status: %s", summary)
+	}
 
 	t.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 192.168.0.0/16")
-	cfgWithProxies, err := Check()
+	certFile, keyFile := writeTestTLSKeyPair(t)
+	t.Setenv("TLS_CERT_FILE", certFile)
+	t.Setenv("TLS_KEY_FILE", keyFile)
+	cfgWithProxiesAndTLS, err := Check()
 	if err != nil {
-		t.Fatalf("check with proxies failed: %v", err)
+		t.Fatalf("check with proxies and TLS failed: %v", err)
 	}
-	summaryWithProxies := cfgWithProxies.Summary()
-	if !strings.Contains(summaryWithProxies, "Trusted Proxies:      10.0.0.0/8, 192.168.0.0/16") {
-		t.Fatalf("summary missing formatted trusted proxies: %s", summaryWithProxies)
+	summaryFull := cfgWithProxiesAndTLS.Summary()
+	if !strings.Contains(summaryFull, "Trusted Proxies:      10.0.0.0/8, 192.168.0.0/16") {
+		t.Fatalf("summary missing formatted trusted proxies: %s", summaryFull)
+	}
+	if !strings.Contains(summaryFull, "TLS Termination:      true") || !strings.Contains(summaryFull, certFile) || !strings.Contains(summaryFull, keyFile) {
+		t.Fatalf("summary missing TLS configuration details: %s", summaryFull)
 	}
 }

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -246,5 +247,23 @@ func TestTrustedProxyForwardingUsesSanitizedChain(t *testing.T) {
 	req.Header.Set("X-Real-IP", "spoofed")
 	req.Header.Set("Forwarded", "for=spoofed")
 	req.Header.Set("X-Forwarded-Port", "1")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+}
+
+func TestForwardingSetsHTTPSWhenTerminatedTLS(t *testing.T) {
+	h, err := NewHandler(
+		[]Route{{Prefix: "/users", Target: "http://users.test"}},
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if got := r.Header.Get("X-Forwarded-Proto"); got != "https" {
+				t.Errorf("X-Forwarded-Proto = %q, want https", got)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "https://public.example/users/x", nil)
+	req.TLS = &tls.ConnectionState{Version: tls.VersionTLS13}
 	h.ServeHTTP(httptest.NewRecorder(), req)
 }
