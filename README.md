@@ -77,21 +77,32 @@ SecureGate/
 │   ├── auth/             # RBAC route→role map
 │   ├── circuitbreaker/   # Thread-safe circuit breaker
 │   ├── config/           # Validated environment and resource settings
-│   ├── httpio/           # Connection bounds, body idle protection, response recorder
+│   ├── httpio/           # Connection bounds, body idle protection, standardized errors
 │   ├── logging/          # Bounded structured logging
 │   ├── metrics/          # Prometheus metric definitions
-│   ├── middlewares/      # Auth, rate limit, metrics, recovery, request-ID
+│   ├── middlewares/      # Auth, rate limit, metrics, recovery, admission, request-ID
 │   ├── proxy/            # Reverse proxy with circuit breaker integration
 │   ├── ratelimit/        # Bounded Redis client, Lua rate limiter, revocation checks
-│   └── routing/          # Shared route-segment matching
+│   ├── routing/          # Shared route-segment matching
+│   └── version/          # Version metadata and runtime build info
 ├── configs/
-│   └── prometheus.yml
+│   ├── grafana/          # Auto-provisioned datasource and overview dashboard
+│   ├── prometheus.yml    # Development Prometheus scrape config
+│   └── prometheus.demo.yml # Containerized demo Prometheus scrape config
+├── scripts/
+│   ├── demo.sh           # One-command host demo stack runner
+│   ├── release.sh        # Multi-platform release compilation & checksums
+│   └── smoke_test.sh     # Operational live smoke test runner
+├── test/
+│   ├── integration/      # Real Redis integration test suite
+│   └── smoke/            # End-to-end operational smoke tests
 ├── .github/workflows/
-│   └── ci.yml            # CI: vet, race tests, binary and image builds
+│   └── ci.yml            # CI: vet, race tests, Redis integration, image builds
 ├── docker-compose.yml    # Redis, Prometheus, Grafana
+├── docker-compose.demo.yml # All-in-one containerized demo stack
 ├── Dockerfile            # Go builder → non-root scratch runtime
-├── .dockerignore        # Restricts the image build context
-└── Makefile
+├── .dockerignore         # Restricts the image build context
+└── Makefile              # Developer tasks and operational commands
 ```
 
 ---
