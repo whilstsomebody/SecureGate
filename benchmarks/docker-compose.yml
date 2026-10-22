@@ -1,0 +1,59 @@
+name: securegate-benchmark
+
+services:
+  upstream:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./upstream.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health"]
+      interval: 1s
+      timeout: 1s
+      retries: 15
+
+  securegate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      AUTH_ENABLED: "false"
+      RATE_LIMIT_ENABLED: "false"
+      USER_SERVICE_ADDR: http://upstream:8080
+      ADMIN_SERVICE_ADDR: http://upstream:8080
+      PAYMENTS_SERVICE_ADDR: http://upstream:8080
+      GATEWAY_PORT: :8080
+      MANAGEMENT_ADDR: 0.0.0.0:9000
+    depends_on:
+      upstream:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      upstream:
+        condition: service_healthy
+
+  benchmark:
+    build:
+      context: ..
+      dockerfile: benchmarks/Dockerfile
+    depends_on:
+      - securegate
+      - nginx
+    volumes:
+      - ./results:/results
+    command:
+      - -targets
+      - securegate=http://securegate:8080/users/hello,nginx=http://nginx:8080/users/hello
+      - -duration
+      - ${BENCH_DURATION:-15s}
+      - -warmup
+      - ${BENCH_WARMUP:-3s}
+      - -concurrency
+      - ${BENCH_CONCURRENCY:-64}
+      - -rounds
+      - ${BENCH_ROUNDS:-3}
+      - -output
+      - /results/comparison.json

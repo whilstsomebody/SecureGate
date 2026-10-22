@@ -1,4 +1,4 @@
-.PHONY: run build test test-integration lint token services docker-up docker-down check-config version demo docker-demo smoke smoke-live release
+.PHONY: run build test test-integration lint token services docker-up docker-down check-config version demo docker-demo smoke smoke-live release benchmark benchmark-down
 
 run:
 	go run ./cmd/gateway
@@ -32,6 +32,13 @@ docker-demo:
 
 release:
 	./scripts/release.sh $(VERSION)
+
+# Compare SecureGate and nginx through the same static upstream.
+benchmark:
+	BENCH_DURATION="$(BENCH_DURATION)" BENCH_WARMUP="$(BENCH_WARMUP)" BENCH_CONCURRENCY="$(BENCH_CONCURRENCY)" BENCH_ROUNDS="$(BENCH_ROUNDS)" sh ./scripts/benchmark.sh
+
+benchmark-down:
+	docker compose -f benchmarks/docker-compose.yml down --remove-orphans
 
 lint:
 	go vet ./...

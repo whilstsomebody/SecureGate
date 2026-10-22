@@ -1,8 +1,8 @@
 # SecureGate — Go Reverse Proxy
 
-SecureGate forwards HTTP requests to configured upstream services, with bounded connections, streaming support, circuit breakers, and isolated management endpoints. The current implementation also includes mandatory JWT authorization and Redis-backed rate limiting and revocation checks.
+SecureGate forwards HTTP requests to configured upstream services, with bounded connections, streaming support, circuit breakers, and isolated management endpoints. JWT authorization and Redis-backed rate limiting and revocation checks are optional policies.
 
-The project is moving toward a lightweight, reverse-proxy-only core. Authentication extraction, backend pools, and comparative performance benchmarks remain future work; this repository does not yet establish a performance advantage over nginx.
+The proxy core can run without those policies. This repository includes a reproducible nginx comparison harness, but does not make a universal performance claim: results depend on the workload and host.
 
 ---
 
@@ -28,6 +28,7 @@ The project is moving toward a lightweight, reverse-proxy-only core. Authenticat
 | **Panic Recovery** | 500 before response commitment; interrupted responses are aborted without appending error text |
 | **Integration & Smoke Tests**| Real Redis integration test suite (`make test-integration`) and end-to-end operational smoke tests (`make smoke`) |
 | **Release Pipeline** | Versioned multi-platform cross-compilation with SHA256 checksums (`make release`) |
+| **nginx Comparison** | Reproducible, alternating-round proxy benchmark against the same upstream (`make benchmark`) |
 
 ---
 
@@ -72,7 +73,9 @@ SecureGate/
 │   ├── userservice/      # Sample user service (port 9001)
 │   ├── adminservice/     # Sample admin service (port 9003)
 │   ├── paymentsservice/  # Sample payments service (port 9002)
-│   └── token/            # JWT token generator CLI
+│   ├── token/            # JWT token generator CLI
+│   └── benchmark/        # Self-contained HTTP benchmark runner
+├── benchmarks/           # Equal-workload nginx comparison stack and saved JSON results
 ├── internal/
 │   ├── auth/             # JWT-related helpers
 │   ├── circuitbreaker/   # Thread-safe circuit breaker
@@ -90,6 +93,7 @@ SecureGate/
 │   ├── prometheus.yml    # Development Prometheus scrape config
 │   └── prometheus.demo.yml # Containerized demo Prometheus scrape config
 ├── scripts/
+│   ├── benchmark.sh      # Comparison-stack orchestration and Docker resource sampling
 │   ├── demo.sh           # One-command host demo stack runner
 │   ├── release.sh        # Multi-platform release compilation & checksums
 │   └── smoke_test.sh     # Operational live smoke test runner
@@ -273,6 +277,27 @@ Invalid configurations immediately exit with status `1` and explain the exact is
 
 ---
 
+## Comparative nginx benchmarks
+
+Run the same request workload through SecureGate and nginx:
+
+```bash
+make benchmark
+```
+
+The isolated Compose stack starts one static upstream, then runs both proxies against `/users/hello`. Both forward the identical `/hello` request to that upstream. SecureGate runs in proxy-only mode, nginx uses a keep-alive upstream, and the built-in benchmark client uses the same connection limit for each target. It waits for readiness, warms each target, and runs alternating target order in every other round. The JSON result is saved to `benchmarks/results/comparison.json`; raw once-per-second Docker CPU, memory, network, block-I/O, and process samples are saved to `benchmarks/results/resources.jsonl`.
+
+Adjust the workload without changing the benchmark definition:
+
+```bash
+BENCH_DURATION=30s BENCH_WARMUP=5s BENCH_CONCURRENCY=128 BENCH_ROUNDS=5 make benchmark
+make benchmark-down
+```
+
+Each result records successful requests per second, errors, bytes, and successful-request p50/p95/p99 latency. Resource samples retain Docker's reported values without unit conversion. Run it on an otherwise idle, consistently resourced Docker host and compare multiple runs. The static upstream is intentionally a proxy-overhead measurement; it does not predict performance for TLS, dynamic responses, large bodies, upgrades, policy middleware, or a production network.
+
+---
+
 ## Manual Setup and Run
 
 Prerequisites: Go 1.25.6 or newer, Docker with Compose for the local Redis stack, and a `.env` containing a nonblank `JWT_SECRET` as shown above. Use a randomly generated secret for your deployment.
@@ -331,6 +356,8 @@ make test-integration  # run integration tests against real Redis
 make smoke             # run operational smoke test suite
 make smoke-live        # run live smoke script against running gateway
 make release           # cross-compile versioned binaries and SHA256SUMS
+make benchmark         # compare proxy-only SecureGate and nginx; writes JSON and resource samples
+make benchmark-down    # stop and remove the benchmark Compose stack
 make lint              # go vet ./...
 make services          # start the three sample upstream services
 make token             # generate a USER token (ROLE=ADMIN for admin token)
@@ -572,41 +599,4 @@ Binaries and `SHA256SUMS` are placed in `bin/release/`:
 - `securegate-v0.2.0-linux-arm64`
 - `securegate-v0.2.0-darwin-amd64`
 - `securegate-v0.2.0-darwin-arm64`
-
----
-
-## Upgrade checklist
-
-- Regenerate tokens missing `iss`, `aud`, `exp`, or a nonblank string `jti`; only HS256 is accepted.
-- Move scrape and probe URLs from public port 8080 to the management listener. Use `/health` for liveness and `/ready` for Redis readiness.
-- Update client error parsers to read JSON envelopes (`error.code`, `error.message`, `error.status`).
-- Honor `Retry-After` headers on `429` and `503` responses.
-- Run `make check-config` or `gateway -check-config` before restarting.
-- For uploads longer than 30 seconds, increase `REQUEST_TIMEOUT_SECONDS` or set it to zero; keep request-body idle protection enabled.
-- Remove clients of `/auth/revoke`; revocation writes belong to your identity service.
-
----
-
-## Completed Practical Improvements & Next Steps
-
-All items from the **Practical Improvements** milestone are complete:
-1. ✅ One-command demo stack (`make demo` / `make docker-demo`).
-2. ✅ `check-config` pre-flight validation command.
-3. ✅ Real Redis integration test suite and CI service containers.
-4. ✅ 15 operational Prometheus metrics (rejections, backend health/load, active sockets/requests/upgrades, upstream latency, timeouts, breaker states, build info).
-5. ✅ Automatically provisioned Grafana data source and "SecureGate Overview" dashboard.
-6. ✅ Consistent JSON error responses and documented retry behavior.
-7. ✅ End-to-end operational smoke tests (`make smoke` and `scripts/smoke_test.sh`).
-8. ✅ Versioned release binaries, build information, and checksum generation (`make release`).
-9. ✅ Docker image build and minimal non-root runtime verification.
-
-### Remaining Architectural Work (Next Phase)
-
-With practical improvements in place, the project will move to the larger architectural milestones:
-1. ✅ **Extract proxy core**: Reverse-proxy forwarding now accepts explicit startup route definitions and can run without JWT, RBAC, Redis, or rate limiting through proxy-only mode.
-2. ✅ **Dynamic routes & reload**: JSON route definitions, segment-safe longest-prefix routing, and validated atomic `SIGHUP` reloads that preserve in-flight requests.
-3. ✅ **Backend pools & load balancing**: Validated backend pools with active health checks, per-backend circuit breaking, round-robin or least-connections selection, and reload-time draining.
-4. ✅ **Explicit trusted-proxy configuration**: CIDR-validated proxy allowlists, safe multi-tier `X-Forwarded-For` evaluation, consistent rate-limit identity, and sanitized upstream forwarding headers.
-5. ✅ **TLS termination**: Optional native HTTPS on the public listener with startup certificate validation and TLS 1.2+ enforcement.
-6. **Comparative benchmarks**: Rigorous performance, latency, and resource benchmarking against nginx.
 

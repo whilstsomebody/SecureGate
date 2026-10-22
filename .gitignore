@@ -1,2 +1,4 @@
 .env
 bin/
+benchmarks/results/*.json
+benchmarks/results/*.jsonl
