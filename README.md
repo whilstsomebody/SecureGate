@@ -125,13 +125,19 @@ SecureGate/
 | `JWT_SECRET` | *(required)* | HMAC secret for JWT signing and validation |
 | `JWT_ISSUER` | `securegate` | Required token issuer (`iss`), exact match |
 | `JWT_AUDIENCE` | `securegate-api` | Required token audience (`aud`), string or array containing this value |
-| `REDIS_ADDR` | `127.0.0.1:6379` | Redis address |
-| `RATE_LIMIT_COUNT` | `5` | Max requests per window per IP |
-| `RATE_LIMIT_WINDOW_SECONDS` | `10` | Window size in seconds |
+| `REDIS_ADDR` | `127.0.0.1:6379` | Redis `host:port` address |
+| `RATE_LIMIT_COUNT` | `5` | Positive integer; max requests per window per IP |
+| `RATE_LIMIT_WINDOW_SECONDS` | `10` | Integer window size, 1–9223372036 seconds |
 | `USER_SERVICE_ADDR` | `http://localhost:9001` | User service base URL |
 | `ADMIN_SERVICE_ADDR` | `http://localhost:9003` | Admin service base URL |
 | `PAYMENTS_SERVICE_ADDR` | `http://localhost:9002` | Payments service base URL |
-| `GATEWAY_PORT` | `:8080` | Port the gateway listens on |
+| `GATEWAY_PORT` | `:8080` | Listen address, `host:port` or `:port` |
+
+Configuration is validated before Redis initialization or opening the gateway listener. Invalid values stop startup with an error naming the setting. Missing or empty optional environment variables use the defaults above; whitespace-only JWT settings and malformed numeric settings are rejected. `JWT_SECRET` must be nonblank. Defaults no longer hide numeric typos, and duration overflow is rejected.
+
+Upstreams require absolute `http://` or `https://` URLs with a hostname or IP address. Base paths and query strings are supported; embedded credentials and fragments are rejected. Explicit ports must be numeric and between 1 and 65535, including Redis and listener ports. Bracket IPv6 addresses, for example `http://[::1]:9001` and `[::]:8080`. Configuration validation checks syntax; DNS resolution and service availability are checked at runtime.
+
+A missing `.env` file is allowed. An existing unreadable or malformed file stops startup (including the token CLI), even when environment variables are present. Environment variables take precedence over `.env`; errors omit configuration values to avoid disclosing secrets.
 
 Create a `.env` file in the project root (see example below):
 

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -11,7 +12,9 @@ import (
 )
 
 func main() {
-	config.LoadENV()
+	if err := config.LoadENV(); err != nil {
+		log.Fatal(err)
+	}
 
 	secret := config.GetJWTSecret()
 
