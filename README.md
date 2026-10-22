@@ -10,19 +10,24 @@ The project is moving toward a lightweight, reverse-proxy-only core. Authenticat
 
 | Feature | Details |
 |---|---|
+| **One-Command Demo** | Single command demo with gateway, Redis, 3 backends, Prometheus, and Grafana (`make demo` or `make docker-demo`) |
+| **Config Validation** | Pre-flight configuration checker without starting listeners or connecting to Redis (`make check-config` / `-t`) |
 | **JWT Authentication** | HS256 only; required expiration, issuer, audience, and nonempty token ID (`jti`) |
 | **RBAC Authorization** | Decoded route-segment matching with USER / ADMIN roles |
-| **Revocation checks** | Existing Redis revocations are enforced; lookup failures return 503. Token management belongs to an external identity service. |
-| **Redis Rate Limiting** | Atomic Lua script; per-client IP window (configurable) |
-| **Circuit Breaker** | Per-service CLOSED → OPEN → HALF_OPEN state machine; 503 on open |
-| **X-Request-ID** | Validated or generated on middleware-handled requests; echoed and forwarded |
+| **Revocation checks** | Existing Redis revocations are enforced; lookup failures return 503 with `Retry-After: 5` |
+| **Redis Rate Limiting** | Atomic Lua script; per-client IP window with `429 Too Many Requests` and `Retry-After` header |
+| **Circuit Breaker** | Per-service CLOSED → OPEN → HALF_OPEN state machine; `503 Service Unavailable` with `Retry-After: 30` on open |
+| **Standardized JSON Errors** | Consistent structured error envelope (`code`, `message`, `status`, `request_id`) across all middleware and proxy failures |
+| **X-Request-ID** | Validated or generated on middleware-handled requests; echoed in response and error envelopes |
 | **Structured Logging** | Opt-in JSON access logs, normalized route/method fields, bounded string values |
-| **Prometheus Metrics** | Request count, latency histogram, rate-limit blocks, auth failures |
-| **Observability stack** | Compose starts Prometheus and Grafana; scraping connectivity and dashboards require setup |
+| **Prometheus Metrics** | 13 operational metrics covering request rate, latency, upstream duration, active sockets/requests/upgrades, admission rejections, timeouts, and breaker states |
+| **Grafana Provisioning** | Auto-provisioned Prometheus datasource and comprehensive "SecureGate Overview" dashboard |
 | **Health Endpoints** | Private management listener: `/health` for liveness, `/ready` for Redis readiness |
 | **Graceful Shutdown** | SIGINT/SIGTERM handled; configurable drain budget (10 seconds by default) |
 | **Resource controls** | Configurable connection/request limits, upload idle timeout, and a separate upgrade budget |
 | **Panic Recovery** | 500 before response commitment; interrupted responses are aborted without appending error text |
+| **Integration & Smoke Tests**| Real Redis integration test suite (`make test-integration`) and end-to-end operational smoke tests (`make smoke`) |
+| **Release Pipeline** | Versioned multi-platform cross-compilation with SHA256 checksums (`make release`) |
 
 ---
 
@@ -154,7 +159,76 @@ Shutdown drains ordinary requests within `SHUTDOWN_TIMEOUT_SECONDS`, then closes
 
 ---
 
-## Setup and Run
+## One-Command Demo
+
+Start the full stack with a single command:
+
+### Option A: Local Host Demo (`make demo`)
+
+```bash
+make demo
+```
+
+This single command:
+1. Starts Redis, Prometheus, and Grafana via Docker (if Docker is available).
+2. Starts the three sample upstream microservices (`userservice` on 9001, `adminservice` on 9003, `paymentsservice` on 9002).
+3. Launches the SecureGate gateway on port `8080` (management on `127.0.0.1:9000`).
+4. Generates demo USER and ADMIN tokens and prints test curl commands.
+5. Pre-provisions the Grafana dashboard at `http://localhost:3000/d/securegate-overview`.
+6. Gracefully shuts down all background processes when interrupted with `Ctrl+C`.
+
+### Option B: 100% Containerized Demo (`make docker-demo`)
+
+```bash
+make docker-demo
+# or: docker compose -f docker-compose.demo.yml up
+```
+
+Runs all 7 services (gateway, Redis, userservice, adminservice, paymentsservice, Prometheus, and Grafana) inside isolated Docker containers.
+
+---
+
+## Configuration Validation (`check-config`)
+
+Verify configuration and resource limits syntax and semantics without starting listeners or attempting Redis connections:
+
+```bash
+# Via makefile:
+make check-config
+
+# Via gateway flag or subcommand:
+./bin/gateway -check-config
+./bin/gateway -t
+./bin/gateway check-config
+```
+
+Example valid output:
+```
+configuration is valid (SecureGate v0.2.0)
+
+Configuration syntax and values:
+  Gateway Listen:       :8080
+  Management Listen:    127.0.0.1:9000
+  Redis Address:        127.0.0.1:6379
+  Access Logging:       false
+  Upstream Services:
+    /users:             http://localhost:9001
+    /admin:             http://localhost:9003
+    /payments:          http://localhost:9002
+  Rate Limiting:        5 requests / 10s per client IP
+  JWT Policy:           issuer="securegate" audience="securegate-api" (secret configured: true)
+  Resource Limits:
+    Max Connections:    1024
+    Max Requests:       256 (upgrades: 32)
+    Max Upstream Conns: 128
+...
+```
+
+Invalid configurations immediately exit with status `1` and explain the exact issue (e.g. `UPSTREAM_URL: must be an absolute HTTP(S) URL`).
+
+---
+
+## Manual Setup and Run
 
 Prerequisites: Go 1.25.6 or newer, Docker with Compose for the local Redis stack, and a `.env` containing a nonblank `JWT_SECRET` as shown above. Use a randomly generated secret for your deployment.
 
@@ -165,15 +239,21 @@ git clone https://github.com/whilstsomebody/securegate.git
 cd securegate
 ```
 
-### 2. Start Redis
+### 2. Validate configuration
+
+```bash
+make check-config
+```
+
+### 3. Start Redis
 
 ```bash
 docker compose up -d redis
 ```
 
-Redis is published on `127.0.0.1:6379`. For the optional monitoring stack, see [Monitoring](#monitoring); `make docker-up` starts all three Compose services but does not make the private management listener reachable from containers.
+Redis is published on `127.0.0.1:6379`. For the monitoring stack, see [Monitoring](#monitoring); `make docker-up` starts Redis, Prometheus, and Grafana with pre-provisioned dashboards.
 
-### 3. Start backend microservices
+### 4. Start backend microservices
 
 ```bash
 go run ./cmd/userservice &
@@ -181,7 +261,7 @@ go run ./cmd/adminservice &
 go run ./cmd/paymentsservice &
 ```
 
-### 4. Run the gateway
+### 5. Run the gateway
 
 ```bash
 make run
@@ -195,14 +275,22 @@ Gateway is live at `http://localhost:8080`.
 ## Makefile Targets
 
 ```bash
-make run          # run the gateway
-make build        # compile to bin/gateway
-make test         # go test ./...
-make lint         # go vet ./...
-make services     # start the three sample upstream services
-make token        # generate a USER token  (ROLE=ADMIN for admin token)
-make docker-up    # start Redis + Prometheus + Grafana
-make docker-down  # stop containers
+make demo              # run one-command interactive demo on host
+make docker-demo       # run all-in-one containerized demo stack
+make check-config      # validate configuration without starting listeners
+make version           # print version and build information
+make run               # run the gateway on :8080
+make build             # compile gateway to bin/gateway
+make test              # run unit tests (go test ./...)
+make test-integration  # run integration tests against real Redis
+make smoke             # run operational smoke test suite
+make smoke-live        # run live smoke script against running gateway
+make release           # cross-compile versioned binaries and SHA256SUMS
+make lint              # go vet ./...
+make services          # start the three sample upstream services
+make token             # generate a USER token (ROLE=ADMIN for admin token)
+make docker-up         # start Redis + Prometheus + Grafana (pre-provisioned)
+make docker-down       # stop containers
 ```
 
 ---
@@ -285,25 +373,68 @@ The gateway's outer Go `ServeMux` still applies its normal redirects for literal
 
 ## Monitoring
 
-| Metric | Type | Labels |
-|---|---|---|
-| `securegate_requests_total` | Counter | path, method, status |
-| `securegate_request_duration_seconds` | Histogram | path |
-| `securegate_rate_limited_total` | Counter | path |
-| `securegate_auth_failures_total` | Counter | path, reason |
-| `securegate_response_aborts_total` | Counter | path |
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `securegate_requests_total` | Counter | `path`, `method`, `status` | Total requests processed through the gateway pipeline |
+| `securegate_request_duration_seconds` | Histogram | `path` | End-to-end request latency distribution |
+| `securegate_rate_limited_total` | Counter | `path` | Total requests blocked by rate limiting (429) |
+| `securegate_auth_failures_total` | Counter | `path`, `reason` | Total authentication and RBAC authorization rejections |
+| `securegate_response_aborts_total` | Counter | `path` | Responses aborted or interrupted before clean completion |
+| `securegate_admission_rejections_total` | Counter | `reason` | Requests rejected by admission bounds (`request_limit` or `upgrade_limit`) |
+| `securegate_active_connections` | Gauge | — | Current open client TCP sockets accepted on public listener |
+| `securegate_active_requests` | Gauge | — | Current active in-flight requests being served |
+| `securegate_active_upgrades` | Gauge | — | Current active upgraded/hijacked WebSocket connections |
+| `securegate_upstream_duration_seconds` | Histogram | `route` | Upstream roundtrip response duration (excluding client body read) |
+| `securegate_timeouts_total` | Counter | `type` | Total timeout events (`upstream_dial`, `upstream_header`, `upstream_read_idle`, `client_read_idle`, `client_write`) |
+| `securegate_circuit_breaker_state` | Gauge | `route` | Circuit breaker status: `0` = CLOSED (healthy), `1` = OPEN (tripped), `2` = HALF_OPEN (probing) |
+| `securegate_build_info` | Gauge | `version`, `commit`, `go_version` | Constant gauge (1) exposing running binary build information |
 
-Metric `path` values for protected traffic are bounded route labels (`/users`, `/payments`, `/admin`, or `unmatched`), never raw URLs. Nonstandard methods use `OTHER`. Request counters and latency include authentication failures, rate-limit rejections, and aborted responses that reach the metrics middleware. Admission rejections, reserved public paths, and management requests occur outside that middleware and are not included. `securegate_response_aborts_total` identifies interrupted responses even when 200 headers were already sent.
+Metric `path` values for protected traffic are bounded route labels (`/users`, `/payments`, `/admin`, or `unmatched`), never raw URLs. Nonstandard methods use `OTHER`.
 
-Start the optional services with `docker compose up -d prometheus grafana`. The supplied scrape configuration targets `host.docker.internal:9000`; a host-run gateway bound only to loopback is not reachable through that address. For container scraping, explicitly bind management to an interface reachable from Docker and restrict access to the monitoring network. Use the private default when scraping from the host.
+### Automated Grafana & Prometheus Provisioning
 
-Grafana is started without provisioned dashboards or data sources. Add a Prometheus data source at `http://prometheus:9090` in Grafana and create or import a dashboard.
+The included Docker Compose stack (`make docker-up` or `make demo`) automatically provisions both:
+- **Datasource**: Prometheus at `http://prometheus:9090` pre-configured as the default data source.
+- **Dashboard**: **SecureGate Overview** pre-loaded with live graphs for request rates, p50/p95/p99 total and upstream latency percentiles, active sockets and requests, admission rejections, breaker states, and timeout counters. Anonymous admin access is enabled for instant local exploration.
 
 - Prometheus UI: `http://localhost:9090`
 - Metrics endpoint: `http://localhost:9000/metrics`
-- Grafana UI: `http://localhost:3000`
+- Grafana UI: `http://localhost:3000/d/securegate-overview`
 
-<img width="1536" height="1024" alt="grafana_prometheus" src="https://github.com/user-attachments/assets/61ca484d-b61f-4cbc-a9aa-21579f12a052" />
+---
+
+## Error Responses & Retry Policy
+
+### Consistent Error Envelope
+
+All error responses generated by the gateway (admission control, rate limiting, authentication, authorization, circuit breakers, and upstream failures) return a standardized JSON envelope with `Content-Type: application/json; charset=utf-8`:
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Too many requests to resolve",
+    "status": 429,
+    "request_id": "req-9876543210"
+  }
+}
+```
+
+The `X-Request-ID` correlation identifier is echoed both in the response header and inside the JSON payload.
+
+### Documented Retry Behavior
+
+| Status Code | Cause | Response Headers | Client Retry Behavior |
+|---|---|---|---|
+| `429 Too Many Requests` | Rate limit window quota exhausted | `Retry-After: <seconds>` | Back off and wait at least the duration specified in `Retry-After` before attempting another request. |
+| `503 Service Unavailable` | Circuit breaker open (upstream failing) | `Retry-After: 30` | Do not hammer the upstream. Wait 30 seconds for the breaker cooldown before sending recovery probe requests. |
+| `503 Service Unavailable` | Gateway concurrency limit (`Proxy busy`) | `Connection: close`, `Retry-After: 1` | Immediate load shedding. Back off with randomized exponential jitter before retrying. |
+| `503 Service Unavailable` | Redis or authorization store unreachable | `Retry-After: 5` | Storage is temporarily unavailable. Retry after 5 seconds. |
+| `502 Bad Gateway` | Upstream connection refused or protocol error | `Content-Type: application/json` | Safe to retry only for **idempotent** HTTP methods (GET, HEAD, PUT, DELETE) with exponential backoff. Non-idempotent methods (POST) must only retry if idempotency keys are used. |
+| `401 Unauthorized` | Missing, expired, or revoked token | `Content-Type: application/json` | Do not retry until fresh, valid credentials are provided. |
+| `403 Forbidden` | Insufficient RBAC role | `Content-Type: application/json` | Do not retry. The token role is not permitted on this path. |
+
+**Gateway Upstream Retry Policy:** SecureGate deliberately does **not** automatically retry failed upstream requests. Transparent proxy retries can trigger thundering herds on recovering upstreams and cause duplicate executions of non-idempotent operations (such as payments). Upstream health is instead managed via fast-failing circuit breakers.
 
 ---
 
@@ -313,54 +444,100 @@ Incoming request IDs are accepted only as a single header value of 1–128 ASCII
 
 Access logs are disabled by default; set `ACCESS_LOG_ENABLED=true` to enable synchronous JSON request logging. Request logs identify the route and normalized method rather than the full URL. Metrics remain enabled regardless. Routine 403/429 outcomes are counted in metrics without warning logs; operational failures remain logged. Structured string/error values are truncated after 1024 bytes to bound individual log records. Slow log sinks can still delay requests when logging is enabled.
 
-## Docker Build
+---
 
-The example below connects a containerized gateway to Compose Redis and the sample services running on the host. Start the sample services first and provide your JWT settings in `.env`.
+## Docker Build & Minimal Runtime
+
+The gateway builds into a minimal `scratch` image containing only the static binary and HTTPS CA certificates, running as non-root user `65532:65532`.
 
 ```bash
-docker compose -p securegate up -d redis
+# Build the container
 docker build -t securegate .
-docker run --rm --name securegate-gateway \
-  --network securegate_default --add-host host.docker.internal:host-gateway \
-  --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
-  -p 8080:8080 -p 127.0.0.1:9000:9000 --env-file .env \
-  -e REDIS_ADDR=redis:6379 \
-  -e USER_SERVICE_ADDR=http://host.docker.internal:9001 \
-  -e ADMIN_SERVICE_ADDR=http://host.docker.internal:9003 \
-  -e PAYMENTS_SERVICE_ADDR=http://host.docker.internal:9002 \
-  -e MANAGEMENT_ADDR=0.0.0.0:9000 securegate
+
+# Verify version inside container
+docker run --rm securegate -version
+
+# Test configuration inside container
+docker run --rm -e JWT_SECRET=test-secret securegate -check-config
 ```
-
-Stop a host-run gateway before using the same published ports. The host services must accept connections from Docker. For upstreams running in containers, use their service names on a shared Docker network instead. Stop this example's Redis stack with `docker compose -p securegate down`.
-
-### Container deployment notes
-
-The gateway builds with Go 1.25.6 (matching `go.mod`), with automatic toolchain downloads disabled in the builder. CI selects Go from `go.mod`, runs race tests, and builds the container. The final image contains the static gateway binary and CA certificates for HTTPS upstream verification, runs as UID/GID 65532, and supports a read-only filesystem. The build context excludes `.env`, Git metadata, tests, and unrelated project files. No runtime configuration secrets are baked into the image.
-
-The Compose file is a local development stack: Redis, Prometheus, and Grafana host ports bind only to `127.0.0.1`. Prometheus configuration is mounted read-only. Set Redis and backend URLs to addresses reachable from the gateway container; `localhost` inside a container refers to that container. For management access through a published container port, explicitly set `MANAGEMENT_ADDR=0.0.0.0:9000` and publish only to a trusted interface (for local access, `-p 127.0.0.1:9000:9000`). Host-run gateways keep the private loopback management default; Docker-hosted Prometheus needs a reachable bind address restricted to your monitoring network.
 
 ---
 
 ## Running Tests
 
 ```bash
+# Run unit tests with race detection
 make test
-go test -race ./... -timeout 60s
+
+# Run integration tests against real Redis (requires Redis on 127.0.0.1:6379 or Docker)
+make test-integration
+
+# Run end-to-end operational smoke test suite
+make smoke
+
+# Run live operational smoke test against running gateway
+make smoke-live
+
+# Run static analysis
 make lint
-docker compose --env-file /dev/null config --quiet
+
+# Validate docker compose syntax
+docker compose config --quiet
+docker compose -f docker-compose.demo.yml config --quiet
 ```
 
-Tests cover JWT policy and revocation failures, peer-based rate limiting, Redis cancellation/deadlines, management isolation, bounded IDs/logging, resource configuration, upload and streaming timeouts, admission limits, circuit breakers, response integrity, escaped routing, and RBAC. No live Redis is required for the Go test suite.
+---
+
+## Building Releases
+
+Produce versioned, cross-compiled release binaries with embedded Git metadata and SHA256 checksums:
+
+```bash
+make release
+# or with specific version:
+make release VERSION=v0.2.0
+```
+
+Binaries and `SHA256SUMS` are placed in `bin/release/`:
+- `securegate-v0.2.0-linux-amd64`
+- `securegate-v0.2.0-linux-arm64`
+- `securegate-v0.2.0-darwin-amd64`
+- `securegate-v0.2.0-darwin-arm64`
+
+---
 
 ## Upgrade checklist
 
 - Regenerate tokens missing `iss`, `aud`, `exp`, or a nonblank string `jti`; only HS256 is accepted.
 - Move scrape and probe URLs from public port 8080 to the management listener. Use `/health` for liveness and `/ready` for Redis readiness.
-- Set `ACCESS_LOG_ENABLED=true` if you need per-request logs; operational error logs and metrics remain enabled.
-- Correct malformed configuration before restarting. Invalid numeric settings and unreadable/malformed `.env` files now stop startup.
+- Update client error parsers to read JSON envelopes (`error.code`, `error.message`, `error.status`).
+- Honor `Retry-After` headers on `429` and `503` responses.
+- Run `make check-config` or `gateway -check-config` before restarting.
 - For uploads longer than 30 seconds, increase `REQUEST_TIMEOUT_SECONDS` or set it to zero; keep request-body idle protection enabled.
 - Remove clients of `/auth/revoke`; revocation writes belong to your identity service.
 
-## Remaining work
+---
 
-JWT/RBAC and Redis are still required, and each route has one upstream. Moving those policies out of the proxy core, building reusable route handlers, supporting backend pools, and adding comparative load benchmarks remain planned work. The public listener currently serves HTTP; deployments requiring TLS termination need to provide it separately. Runtime settings are loaded once; configuration reload is not implemented.
+## Completed Practical Improvements & Next Steps
+
+All items from the **Practical Improvements** milestone are complete:
+1. ✅ One-command demo stack (`make demo` / `make docker-demo`).
+2. ✅ `check-config` pre-flight validation command.
+3. ✅ Real Redis integration test suite and CI service containers.
+4. ✅ 13 operational Prometheus metrics (rejections, active sockets/requests/upgrades, upstream latency, timeouts, breaker states, build info).
+5. ✅ Automatically provisioned Grafana data source and "SecureGate Overview" dashboard.
+6. ✅ Consistent JSON error responses and documented retry behavior.
+7. ✅ End-to-end operational smoke tests (`make smoke` and `scripts/smoke_test.sh`).
+8. ✅ Versioned release binaries, build information, and checksum generation (`make release`).
+9. ✅ Docker image build and minimal non-root runtime verification.
+
+### Remaining Architectural Work (Next Phase)
+
+With practical improvements in place, the project will move to the larger architectural milestones:
+1. **Extract proxy core**: Decouple reverse proxy forwarding from JWT, RBAC, and Redis policies.
+2. **Dynamic routes & reload**: Configurable route definitions with atomic, zero-downtime reloads.
+3. **Backend pools & load balancing**: Health tracking, active drain, round-robin, and least-connections routing.
+4. **Explicit trusted-proxy configuration**: Safe forwarding header evaluation for multi-tier proxy topologies.
+5. **TLS termination**: Native HTTPS termination support.
+6. **Comparative benchmarks**: Rigorous performance, latency, and resource benchmarking against nginx.
+

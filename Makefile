@@ -1,4 +1,4 @@
-.PHONY: run build test lint token services docker-up docker-down
+.PHONY: run build test test-integration lint token services docker-up docker-down check-config version demo docker-demo smoke smoke-live release
 
 run:
 	go run ./cmd/gateway
@@ -6,8 +6,32 @@ run:
 build:
 	go build -o bin/gateway ./cmd/gateway
 
+check-config:
+	go run ./cmd/gateway -check-config
+
+version:
+	go run ./cmd/gateway -version
+
 test:
 	go test ./...
+
+test-integration:
+	go test -v -race ./test/integration/...
+
+smoke:
+	go test -v -race ./test/smoke/...
+
+smoke-live:
+	./scripts/smoke_test.sh
+
+demo:
+	./scripts/demo.sh
+
+docker-demo:
+	docker compose -f docker-compose.demo.yml up
+
+release:
+	./scripts/release.sh $(VERSION)
 
 lint:
 	go vet ./...
@@ -27,3 +51,4 @@ docker-up:
 
 docker-down:
 	docker compose down
+
