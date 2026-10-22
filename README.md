@@ -156,7 +156,7 @@ Rate-limit, revocation, and readiness operations inherit request contexts and ha
 
 ## Resource limits
 
-The current safety defaults are fixed in code; configuration tuning is a follow-up change.
+The following defaults are configurable; see “Configurable proxy resource limits” below.
 
 | Resource | Limit |
 |---|---|
@@ -172,7 +172,7 @@ The current safety defaults are fixed in code; configuration tuning is a follow-
 | Each upstream body read, including upgraded connections | 60 seconds |
 | Concurrent metric scrapes / scrape timeout | 2 / 5 seconds |
 
-Active response streams have no fixed total-duration limit, but upstream reads must continue making progress. Slow uploads exceeding 30 seconds and upstream streams silent for 60 seconds will be terminated. Shutdown drains ordinary requests for up to 10 seconds, then closes remaining connections, including upgrades.
+Active response streams have no fixed total-duration limit, but upstream reads must continue making progress. By default, uploads exceeding 30 seconds and upstream streams silent for 60 seconds are terminated; tune the limits below for your workload. Shutdown drains ordinary requests for up to 10 seconds, then closes remaining connections, including upgrades.
 
 ---
 
@@ -343,3 +343,26 @@ Update monitoring and probes to port 9000. Docker-hosted Prometheus needs an exp
 Incoming request IDs are accepted only as a single header value of 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`; all other IDs are replaced with a generated ID before forwarding and echoing. IDs are correlation labels, not trusted identities.
 
 Access logs are disabled by default; set `ACCESS_LOG_ENABLED=true` to enable synchronous JSON request logging. Request logs identify the route and normalized method rather than the full URL. Metrics remain enabled regardless. Routine 403/429 outcomes are counted in metrics without warning logs; operational failures remain logged. Structured string/error values are truncated after 1024 bytes to bound individual log records. Slow log sinks can still delay requests when logging is enabled.
+
+### Configurable proxy resource limits
+
+Settings are read once at startup; restart to apply changes. Capacities must be positive integers (at most 1,000,000; header size at most 1 MiB). Timeouts are integer seconds between 1 and 86400, except `REQUEST_TIMEOUT_SECONDS`, which also accepts zero.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `MAX_CONNECTIONS` | `1024` | Public accepted sockets, including idle and upgraded connections |
+| `MAX_REQUESTS` | `256` | All concurrent public requests, including streams |
+| `MAX_UPGRADE_REQUESTS` | `32` | Additional smaller budget for upgrade requests; must not exceed `MAX_REQUESTS` |
+| `MAX_UPSTREAM_CONNECTIONS` | `128` | Connections per upstream host |
+| `MAX_HEADER_BYTES` | `65536` | Client request and upstream response header limits |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Complete client request headers |
+| `REQUEST_TIMEOUT_SECONDS` | `30` | Complete client request including body; zero disables this total deadline |
+| `CLIENT_READ_IDLE_SECONDS` | `30` | Maximum wait for an individual request-body read |
+| `CLIENT_WRITE_TIMEOUT_SECONDS` | `30` | Maximum wait for a client socket write |
+| `KEEPALIVE_TIMEOUT_SECONDS` | `60` | HTTP keep-alive idle timeout |
+| `UPSTREAM_DIAL_TIMEOUT_SECONDS` | `5` | Upstream connection establishment |
+| `UPSTREAM_HEADER_TIMEOUT_SECONDS` | `15` | Wait for upstream response headers |
+| `UPSTREAM_READ_IDLE_SECONDS` | `60` | Maximum wait for an upstream body read, including upgrades |
+| `SHUTDOWN_TIMEOUT_SECONDS` | `10` | Graceful shutdown budget |
+
+For long uploads, set `REQUEST_TIMEOUT_SECONDS=0` (or a larger total deadline). Client read-idle protection remains enabled; uploads must continue making progress. SSE and other responses have no total response-duration cap, but reads and writes must progress within their configured timeouts. Upgraded connections count against both admission budgets until they close; idle upgraded connections expire under the upstream read limit. SSE streams share the main request budget. Management limits remain separately fixed at 32 sockets and 8 requests, with two scrapes and two readiness checks at a time.

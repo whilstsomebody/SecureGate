@@ -18,7 +18,7 @@ import (
 )
 
 func NewProxyhandler() http.Handler {
-	return newProxyHandler(readIdleTransport(upstreamTransport, 60*time.Second))
+	return newProxyHandler(readIdleTransport(upstreamTransport, config.EffectiveLimits().UpstreamReadIdle))
 }
 
 func newProxyHandler(transport http.RoundTripper) http.Handler {

@@ -17,6 +17,7 @@ import (
 )
 
 type Config struct {
+	Limits              ResourceLimits
 	AccessLogEnabled    bool
 	JWTSecret           string
 	JWTIssuer           string
@@ -94,6 +95,11 @@ func fromEnvironment(get func(string) string) (*Config, error) {
 	if err != nil || count <= 0 {
 		return nil, errors.New("RATE_LIMIT_COUNT: must be a positive integer within the platform int range")
 	}
+	limits, err := parseLimits(get)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Limits = limits
 	cfg.RateLimitCount = count
 	seconds, err := strconv.ParseInt(value("RATE_LIMIT_WINDOW_SECONDS", "10"), 10, 64)
 	if err != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {

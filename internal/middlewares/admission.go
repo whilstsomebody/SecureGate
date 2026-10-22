@@ -21,3 +21,16 @@ func LimitRequests(next http.Handler, limit int) http.Handler {
 		}
 	})
 }
+
+// LimitUpgrades reserves a smaller budget for long-lived upgraded connections.
+// The outer request limit still bounds all traffic, including SSE streams.
+func LimitUpgrades(next http.Handler, limit int) http.Handler {
+	limited := LimitRequests(next, limit)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "" {
+			limited.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

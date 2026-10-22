@@ -35,21 +35,24 @@ func main() {
 	}
 	defer ratelimit.Rdb.Close()
 	metrics.RegisterMetrics()
+	limits := cfg.Limits
+	proxy.ConfigureTransport(limits)
 
 	server := &http.Server{
 		Addr:              cfg.GatewayPort,
 		Handler:           newHandler(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    64 << 10,
+		ConnContext:       httpio.ConnectionContext,
+		ReadHeaderTimeout: limits.HeaderTimeout,
+		ReadTimeout:       limits.RequestTimeout,
+		IdleTimeout:       limits.KeepAliveTimeout,
+		MaxHeaderBytes:    limits.MaxHeaderBytes,
 	}
 
 	listener, err := net.Listen("tcp", cfg.GatewayPort)
 	if err != nil {
 		log.Fatalf("listen failed: %v", err)
 	}
-	limited := httpio.LimitListener(listener, 1024, 30*time.Second)
+	limited := httpio.LimitListener(listener, limits.MaxConnections, limits.ClientWriteTimeout)
 	defer limited.CloseConnections()
 	defer proxy.CloseIdleConnections()
 
@@ -78,7 +81,7 @@ func main() {
 	<-quit
 
 	slog.Info("shutting down gracefully...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), limits.ShutdownTimeout)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
@@ -138,7 +141,8 @@ func newHandler() http.Handler {
 	)
 	mux.Handle("/", secureHandler)
 
-	return middlewares.LimitRequests(mux, 256)
+	limits := config.EffectiveLimits()
+	return httpio.LimitRequestBodyReads(middlewares.LimitRequests(middlewares.LimitUpgrades(mux, limits.MaxUpgradeRequests), limits.MaxRequests), limits.ClientReadIdle)
 }
 
 func newManagementHandler() http.Handler {

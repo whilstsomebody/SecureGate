@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"github.com/whilstsomebody/securegate/internal/config"
 	"io"
 	"net"
 	"net/http"
@@ -11,13 +12,21 @@ import (
 
 var upstreamTransport = boundedTransport()
 
-func boundedTransport() *http.Transport {
+// ConfigureTransport is called once at startup, before requests are served.
+func ConfigureTransport(limits config.ResourceLimits) {
+	upstreamTransport.CloseIdleConnections()
+	upstreamTransport = transportWithLimits(limits)
+}
+
+func boundedTransport() *http.Transport { return transportWithLimits(config.DefaultLimits()) }
+
+func transportWithLimits(limits config.ResourceLimits) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	transport.ResponseHeaderTimeout = 15 * time.Second
-	transport.MaxConnsPerHost = 128
-	transport.MaxIdleConnsPerHost = 32
-	transport.MaxResponseHeaderBytes = 64 << 10
+	transport.DialContext = (&net.Dialer{Timeout: limits.UpstreamDialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	transport.ResponseHeaderTimeout = limits.UpstreamHeaderTimeout
+	transport.MaxConnsPerHost = limits.MaxUpstreamConnections
+	transport.MaxIdleConnsPerHost = min(32, limits.MaxUpstreamConnections)
+	transport.MaxResponseHeaderBytes = int64(limits.MaxHeaderBytes)
 	return transport
 }
 

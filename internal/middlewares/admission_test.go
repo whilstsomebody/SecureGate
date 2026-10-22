@@ -39,3 +39,29 @@ func TestAdmissionReleasesCapacityOnPanic(t *testing.T) {
 		}()
 	}
 }
+
+func TestUpgradeBudgetLeavesOrdinaryRequestsAvailable(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	h := LimitRequests(LimitUpgrades(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "" {
+			close(entered)
+			<-release
+		}
+	}), 1), 2)
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Upgrade", "websocket")
+	go func() { defer close(done); h.ServeHTTP(httptest.NewRecorder(), req) }()
+	<-entered
+	defer func() { close(release); <-done }()
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.Clone(req.Context()))
+	if rr.Code != 503 {
+		t.Fatalf("extra upgrade: %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if rr.Code != 200 {
+		t.Fatalf("ordinary request blocked: %d", rr.Code)
+	}
+}

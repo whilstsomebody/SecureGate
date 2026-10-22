@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/whilstsomebody/securegate/internal/config"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,5 +90,23 @@ func TestUpgradeReadIdleTimeoutClosesConnection(t *testing.T) {
 	case <-closed:
 	case <-time.After(time.Second):
 		t.Fatal("upgrade connection not closed")
+	}
+}
+
+func TestTransportUsesConfiguredLimits(t *testing.T) {
+	limits := config.DefaultLimits()
+	limits.MaxUpstreamConnections = 7
+	limits.UpstreamHeaderTimeout = 10 * time.Millisecond
+	limits.MaxHeaderBytes = 4096
+	transport := transportWithLimits(limits)
+	defer transport.CloseIdleConnections()
+	if transport.MaxConnsPerHost != 7 || transport.MaxIdleConnsPerHost != 7 || transport.MaxResponseHeaderBytes != 4096 {
+		t.Fatal("transport limits ignored")
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer upstream.Close()
+	req, _ := http.NewRequest("GET", upstream.URL, nil)
+	if _, err := transport.RoundTrip(req); err == nil {
+		t.Fatal("header timeout ignored")
 	}
 }
