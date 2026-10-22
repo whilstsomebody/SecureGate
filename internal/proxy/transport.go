@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"context"
-	"github.com/whilstsomebody/securegate/internal/config"
 	"io"
 	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
 var upstreamTransport = boundedTransport()
@@ -68,7 +70,12 @@ func (b *idleBody) Read(p []byte) (int, error) {
 	if b.expired.Load() {
 		return 0, context.DeadlineExceeded
 	}
-	timer := time.AfterFunc(b.timeout, func() { b.expired.Store(true); b.cancel(); b.ReadCloser.Close() })
+	timer := time.AfterFunc(b.timeout, func() {
+		b.expired.Store(true)
+		metrics.Timeouts.WithLabelValues("upstream_read_idle").Inc()
+		b.cancel()
+		b.ReadCloser.Close()
+	})
 	n, err := b.ReadCloser.Read(p)
 	timer.Stop()
 	if b.expired.Load() {

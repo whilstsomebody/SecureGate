@@ -4,6 +4,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
 // LimitedListener bounds accepted sockets, including idle and hijacked ones.
@@ -45,6 +47,7 @@ func (l *LimitedListener) Accept() (net.Conn, error) {
 	default:
 	}
 	l.active[c] = struct{}{}
+	metrics.ActiveConnections.Inc()
 	l.mu.Unlock()
 	return c, nil
 }
@@ -80,13 +83,20 @@ func (c *limitedConn) Write(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	return c.Conn.Write(p)
+	n, err := c.Conn.Write(p)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			metrics.Timeouts.WithLabelValues("client_write").Inc()
+		}
+	}
+	return n, err
 }
 func (c *limitedConn) Close() error {
 	c.once.Do(func() {
 		c.closeErr = c.Conn.Close()
 		c.owner.mu.Lock()
 		delete(c.owner.active, c)
+		metrics.ActiveConnections.Dec()
 		c.owner.mu.Unlock()
 		<-c.owner.slots
 	})

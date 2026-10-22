@@ -13,9 +13,16 @@ import (
 
 	"github.com/whilstsomebody/securegate/internal/circuitbreaker"
 	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/httpio"
 	"github.com/whilstsomebody/securegate/internal/metrics"
 	"github.com/whilstsomebody/securegate/internal/routing"
 )
+
+func init() {
+	circuitbreaker.OnStateChange = func(name string, state circuitbreaker.State) {
+		metrics.CircuitBreakerState.WithLabelValues(name).Set(float64(state))
+	}
+}
 
 func NewProxyhandler() http.Handler {
 	return newProxyHandler(readIdleTransport(upstreamTransport, config.EffectiveLimits().UpstreamReadIdle))
@@ -29,18 +36,19 @@ func newProxyHandler(transport http.RoundTripper) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := getTargetService(r.URL.Path)
 		if target == "" {
-			http.NotFound(w, r)
+			httpio.WriteError(w, r, http.StatusNotFound, "ROUTE_NOT_FOUND", "Not found")
 			return
 		}
 		targetURL, err := url.Parse(target)
 		if err != nil || targetURL.Host == "" || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
-			http.Error(w, "Invalid target URL", http.StatusInternalServerError)
+			httpio.WriteError(w, r, http.StatusInternalServerError, "INVALID_TARGET_URL", "Invalid target URL")
 			return
 		}
 		breaker := breakers[routing.Prefix(r.URL.Path)]
 		finish, allowed := breaker.Acquire()
 		if !allowed {
-			http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
+			w.Header().Set("Retry-After", "30")
+			httpio.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Service temporarily unavailable")
 			return
 		}
 		var upstreamFailed, clientBodyFailed atomic.Bool
@@ -72,8 +80,13 @@ func newProxyHandler(transport http.RoundTripper) http.Handler {
 				}
 			},
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				start := time.Now()
 				response, err := transport.RoundTrip(req)
+				metrics.UpstreamDuration.WithLabelValues(metrics.RouteLabel(r.URL.Path)).Observe(time.Since(start).Seconds())
 				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						metrics.Timeouts.WithLabelValues("upstream_timeout").Inc()
+					}
 					upstreamFailed.Store(true)
 					return response, err
 				}
@@ -92,7 +105,7 @@ func newProxyHandler(transport http.RoundTripper) http.Handler {
 					return
 				}
 				slog.Error("upstream error", "route", metrics.RouteLabel(r.URL.Path), "error", err, "request_id", r.Header.Get("X-Request-ID"))
-				http.Error(w, "Bad gateway", http.StatusBadGateway)
+				httpio.WriteError(w, req, http.StatusBadGateway, "BAD_GATEWAY", "Bad gateway")
 			},
 		}
 		rp.ServeHTTP(w, req)

@@ -40,11 +40,78 @@ var (
 		},
 		[]string{"path", "reason"},
 	)
+
+	AdmissionRejections = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "securegate_admission_rejections_total",
+			Help: "Total requests rejected at admission control due to concurrency limits",
+		},
+		[]string{"reason"},
+	)
+
+	ActiveConnections = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "securegate_active_connections",
+			Help: "Current number of active client connections on public listener",
+		},
+	)
+
+	ActiveRequests = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "securegate_active_requests",
+			Help: "Current number of active requests being processed",
+		},
+	)
+
+	ActiveUpgrades = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "securegate_active_upgrades",
+			Help: "Current number of active upgraded connections",
+		},
+	)
+
+	UpstreamDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "securegate_upstream_duration_seconds",
+			Help:    "Upstream roundtrip response duration in seconds",
+			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+		},
+		[]string{"route"},
+	)
+
+	Timeouts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "securegate_timeouts_total",
+			Help: "Total timeout events across client and upstream IO",
+		},
+		[]string{"type"},
+	)
+
+	CircuitBreakerState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "securegate_circuit_breaker_state",
+			Help: "Circuit breaker state by route (0=CLOSED, 1=OPEN, 2=HALF_OPEN)",
+		},
+		[]string{"route"},
+	)
+
+	BuildInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "securegate_build_info",
+			Help: "Build information about the running SecureGate binary",
+		},
+		[]string{"version", "commit", "go_version"},
+	)
 )
 
 // RegisterMetrics registers all metrics. Safe to call multiple times (e.g. in tests).
 func RegisterMetrics() {
-	for _, c := range []prometheus.Collector{RequestCount, RequestDuration, RateLimitedCount, AuthFailures, ResponseAborts} {
+	collectors := []prometheus.Collector{
+		RequestCount, RequestDuration, RateLimitedCount, AuthFailures, ResponseAborts,
+		AdmissionRejections, ActiveConnections, ActiveRequests, ActiveUpgrades,
+		UpstreamDuration, Timeouts, CircuitBreakerState, BuildInfo,
+	}
+	for _, c := range collectors {
 		if err := prometheus.Register(c); err != nil {
 			if _, alreadyRegistered := err.(prometheus.AlreadyRegisteredError); !alreadyRegistered {
 				panic(err)

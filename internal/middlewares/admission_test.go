@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
 func TestAdmissionRejectsOverloadAndReleasesCapacity(t *testing.T) {
@@ -63,5 +65,39 @@ func TestUpgradeBudgetLeavesOrdinaryRequestsAvailable(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
 	if rr.Code != 200 {
 		t.Fatalf("ordinary request blocked: %d", rr.Code)
+	}
+}
+
+func TestAdmissionMetricsTracked(t *testing.T) {
+	metrics.RegisterMetrics()
+	h := LimitRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), 1)
+
+	// Fill slot and hold
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	slowH := LimitRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}), 1)
+
+	go slowH.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	<-entered
+
+	// Overload request must increment rejection metric
+	rr := httptest.NewRecorder()
+	slowH.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rr.Code)
+	}
+	close(release)
+
+	// Clean single request works
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 }

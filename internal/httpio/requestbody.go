@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/whilstsomebody/securegate/internal/metrics"
 )
 
 type connectionKey struct{}
@@ -37,7 +39,11 @@ func (b *idleRequestBody) Read(p []byte) (int, error) {
 	if b.expired.Load() {
 		return 0, context.DeadlineExceeded
 	}
-	timer := time.AfterFunc(b.timeout, func() { b.expired.Store(true); b.conn.Close() })
+	timer := time.AfterFunc(b.timeout, func() {
+		b.expired.Store(true)
+		metrics.Timeouts.WithLabelValues("client_read_idle").Inc()
+		b.conn.Close()
+	})
 	n, err := b.ReadCloser.Read(p)
 	timer.Stop()
 	if b.expired.Load() {
