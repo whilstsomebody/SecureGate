@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: "SecureGate"
+    orgId: 1
+    folder: "SecureGate"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards

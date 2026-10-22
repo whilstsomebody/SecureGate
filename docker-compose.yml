@@ -18,3 +18,12 @@ services:
     image: grafana/grafana
     ports:
       - "127.0.0.1:3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./configs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./configs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./configs/grafana/dashboards:/etc/grafana/dashboards:ro
+
