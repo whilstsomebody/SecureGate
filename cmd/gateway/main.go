@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -21,9 +22,34 @@ import (
 	"github.com/whilstsomebody/securegate/internal/middlewares"
 	"github.com/whilstsomebody/securegate/internal/proxy"
 	"github.com/whilstsomebody/securegate/internal/ratelimit"
+	"github.com/whilstsomebody/securegate/internal/version"
 )
 
 func main() {
+	var checkConfig bool
+	var showVersion bool
+	flag.BoolVar(&checkConfig, "check-config", false, "Validate configuration and resource limits without starting services")
+	flag.BoolVar(&checkConfig, "t", false, "Validate configuration (shorthand)")
+	flag.BoolVar(&showVersion, "version", false, "Print version and build information")
+	flag.BoolVar(&showVersion, "v", false, "Print version (shorthand)")
+	flag.Parse()
+
+	if showVersion || (len(os.Args) > 1 && os.Args[1] == "version") {
+		fmt.Println(version.Info())
+		return
+	}
+
+	if checkConfig || (len(os.Args) > 1 && os.Args[1] == "check-config") {
+		cfg, err := config.Check()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "configuration check failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("configuration is valid (%s)\n\n", version.Info())
+		fmt.Print(cfg.Summary())
+		return
+	}
+
 	slog.SetDefault(slog.New(logging.NewHandler(os.Stdout)))
 
 	cfg, err := config.Load()
@@ -70,7 +96,7 @@ func main() {
 	}()
 
 	go func() {
-		slog.Info("SecureGate starting", "port", cfg.GatewayPort)
+		slog.Info("SecureGate starting", "version", version.Version, "port", cfg.GatewayPort)
 		if err := server.Serve(limited); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server failed: %v", err)
 		}

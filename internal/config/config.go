@@ -35,12 +35,17 @@ type Config struct {
 // Cfg is the global config instance loaded at startup.
 var Cfg *Config
 
-// Load validates all settings before publishing the global configuration.
-func Load() (*Config, error) {
+// Check validates environment and file configuration without setting global state.
+func Check() (*Config, error) {
 	if err := LoadENV(); err != nil {
 		return nil, err
 	}
-	cfg, err := fromEnvironment(os.Getenv)
+	return fromEnvironment(os.Getenv)
+}
+
+// Load validates all settings before publishing the global configuration.
+func Load() (*Config, error) {
+	cfg, err := Check()
 	if err != nil {
 		return nil, err
 	}
@@ -207,3 +212,36 @@ func getenvOrDefault(key, fallback string) string {
 // GetJWTIssuer and GetJWTAudience share the gateway policy with the token CLI.
 func GetJWTIssuer() string   { return getenvOrDefault("JWT_ISSUER", "securegate") }
 func GetJWTAudience() string { return getenvOrDefault("JWT_AUDIENCE", "securegate-api") }
+
+// Summary returns a human-readable description of the loaded configuration.
+func (c *Config) Summary() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Configuration syntax and values:\n")
+	fmt.Fprintf(&b, "  Gateway Listen:       %s\n", c.GatewayPort)
+	fmt.Fprintf(&b, "  Management Listen:    %s\n", c.ManagementAddr)
+	fmt.Fprintf(&b, "  Redis Address:        %s\n", c.RedisAddr)
+	fmt.Fprintf(&b, "  Access Logging:       %t\n", c.AccessLogEnabled)
+	fmt.Fprintf(&b, "  Upstream Services:\n")
+	fmt.Fprintf(&b, "    /users:             %s\n", c.UserServiceAddr)
+	fmt.Fprintf(&b, "    /admin:             %s\n", c.AdminServiceAddr)
+	fmt.Fprintf(&b, "    /payments:          %s\n", c.PaymentsServiceAddr)
+	fmt.Fprintf(&b, "  Rate Limiting:        %d requests / %s per client IP\n", c.RateLimitCount, c.RateLimitWindow)
+	fmt.Fprintf(&b, "  JWT Policy:           issuer=%q audience=%q (secret configured: %t)\n", c.JWTIssuer, c.JWTAudience, len(c.JWTSecret) > 0)
+	fmt.Fprintf(&b, "  Resource Limits:\n")
+	fmt.Fprintf(&b, "    Max Connections:    %d\n", c.Limits.MaxConnections)
+	fmt.Fprintf(&b, "    Max Requests:       %d (upgrades: %d)\n", c.Limits.MaxRequests, c.Limits.MaxUpgradeRequests)
+	fmt.Fprintf(&b, "    Max Upstream Conns: %d\n", c.Limits.MaxUpstreamConnections)
+	fmt.Fprintf(&b, "    Max Header Bytes:   %d bytes\n", c.Limits.MaxHeaderBytes)
+	fmt.Fprintf(&b, "    Timeouts:\n")
+	fmt.Fprintf(&b, "      Header Timeout:   %s\n", c.Limits.HeaderTimeout)
+	fmt.Fprintf(&b, "      Request Timeout:  %s\n", c.Limits.RequestTimeout)
+	fmt.Fprintf(&b, "      Client Read Idle: %s\n", c.Limits.ClientReadIdle)
+	fmt.Fprintf(&b, "      Client Write:     %s\n", c.Limits.ClientWriteTimeout)
+	fmt.Fprintf(&b, "      Keep-Alive Idle:  %s\n", c.Limits.KeepAliveTimeout)
+	fmt.Fprintf(&b, "      Upstream Dial:    %s\n", c.Limits.UpstreamDialTimeout)
+	fmt.Fprintf(&b, "      Upstream Header:  %s\n", c.Limits.UpstreamHeaderTimeout)
+	fmt.Fprintf(&b, "      Upstream Read:    %s\n", c.Limits.UpstreamReadIdle)
+	fmt.Fprintf(&b, "      Shutdown Budget:  %s\n", c.Limits.ShutdownTimeout)
+	return b.String()
+}
+

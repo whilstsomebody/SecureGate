@@ -127,3 +127,20 @@ func TestDotenvErrorsAndPrecedence(t *testing.T) {
 		t.Fatal("dotenv overrode environment")
 	}
 }
+
+func TestCheckAndSummary(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("JWT_SECRET", "test-secret-value")
+	cfg, err := Check()
+	if err != nil {
+		t.Fatalf("check failed: %v", err)
+	}
+	summary := cfg.Summary()
+	if !strings.Contains(summary, "Configuration syntax and values:") {
+		t.Fatalf("unexpected summary: %s", summary)
+	}
+	if !strings.Contains(summary, "/users:") || !strings.Contains(summary, "Max Connections:") {
+		t.Fatalf("summary missing essential keys: %s", summary)
+	}
+}
+

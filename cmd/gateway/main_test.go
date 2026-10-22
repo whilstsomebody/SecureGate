@@ -2,9 +2,13 @@ package main
 
 import (
 	"errors"
-	"github.com/whilstsomebody/securegate/internal/ratelimit"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/whilstsomebody/securegate/internal/config"
+	"github.com/whilstsomebody/securegate/internal/ratelimit"
+	"github.com/whilstsomebody/securegate/internal/version"
 )
 
 type unreadableBody struct{ t *testing.T }
@@ -51,3 +55,19 @@ func TestManagementIsolationAndLiveness(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionAndCheckConfig(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	cfg, err := config.Check()
+	if err != nil {
+		t.Fatalf("expected valid check: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	info := version.Info()
+	if !strings.Contains(info, "SecureGate") {
+		t.Fatalf("version info invalid: %s", info)
+	}
+}
+
