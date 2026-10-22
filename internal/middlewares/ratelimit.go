@@ -33,10 +33,10 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 		}
 
 		ip := clientIP(r)
-		allowed, err := allowFn(ip, limit, window)
+		allowed, err := allowFn(r.Context(), ip, limit, window)
 		if err != nil {
 			slog.Error("rate limiter error", "error", err, "ip", ip, "request_id", r.Header.Get(RequestIDHeader))
-			http.Error(w, "Rate limiter error", http.StatusInternalServerError)
+			http.Error(w, "Rate limiter unavailable", http.StatusServiceUnavailable)
 			return
 		}
 

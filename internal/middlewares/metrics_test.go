@@ -1,6 +1,7 @@
 package middlewares
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,7 @@ func TestRejectedTrafficHasBoundedMetricLabels(t *testing.T) {
 	original := allowFn
 	defer func() { allowFn = original }()
 	allow := true
-	allowFn = func(string, int, time.Duration) (bool, error) { return allow, nil }
+	allowFn = func(context.Context, string, int, time.Duration) (bool, error) { return allow, nil }
 	h := MetricsMiddleware(RecoveryMiddleware(RateLimitMiddleware(AuthMiddleware(http.NotFoundHandler()))))
 	for i := 0; i < 200; i++ {
 		allow = i%2 == 0

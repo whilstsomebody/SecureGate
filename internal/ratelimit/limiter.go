@@ -1,6 +1,8 @@
 package ratelimit
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -17,10 +19,18 @@ end
 return count
 `)
 
-func AllowRequest(key string, limit int, window time.Duration) (bool, error) {
+func AllowRequest(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if Rdb == nil {
+		return false, errors.New("rate limit store unavailable")
+	}
 	redisKey := fmt.Sprintf("rate:%s", key)
 
-	count, err := rateLimitScript.Run(Ctx, Rdb, []string{redisKey}, int(window.Seconds())).Int64()
+	count, err := rateLimitScript.Run(ctx, Rdb, []string{redisKey}, int(window.Seconds())).Int64()
 	if err != nil {
 		return false, err
 	}

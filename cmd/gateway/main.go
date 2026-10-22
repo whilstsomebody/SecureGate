@@ -29,7 +29,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid configuration: %v", err)
 	}
-	ratelimit.InitRedis(cfg.RedisAddr)
+	if err := ratelimit.InitRedis(context.Background(), cfg.RedisAddr); err != nil {
+		log.Fatal("Redis initialization failed")
+	}
+	defer ratelimit.Rdb.Close()
 	metrics.RegisterMetrics()
 
 	server := &http.Server{
@@ -75,7 +78,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	redisStatus := "ok"
 	httpStatus := http.StatusOK
 
-	if _, err := ratelimit.Rdb.Ping(ratelimit.Ctx).Result(); err != nil {
+	if err := ratelimit.Ping(r.Context()); err != nil {
 		slog.Error("health check: Redis unreachable", "error", err)
 		redisStatus = "error"
 		httpStatus = http.StatusServiceUnavailable

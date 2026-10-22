@@ -1,6 +1,7 @@
 package middlewares
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -45,7 +46,7 @@ func TestRateLimitMiddlewareAllows(t *testing.T) {
 	// Replace allowFn with a stub that always permits.
 	original := allowFn
 	defer func() { allowFn = original }()
-	allowFn = func(key string, limit int, window time.Duration) (bool, error) { return true, nil }
+	allowFn = func(ctx context.Context, key string, limit int, window time.Duration) (bool, error) { return true, nil }
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := RateLimitMiddleware(inner)
@@ -62,7 +63,9 @@ func TestRateLimitMiddlewareAllows(t *testing.T) {
 func TestRateLimitMiddlewareBlocks(t *testing.T) {
 	original := allowFn
 	defer func() { allowFn = original }()
-	allowFn = func(key string, limit int, window time.Duration) (bool, error) { return false, nil }
+	allowFn = func(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
+		return false, nil
+	}
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	handler := RateLimitMiddleware(inner)

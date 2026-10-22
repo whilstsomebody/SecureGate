@@ -80,7 +80,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		revoked, err := ratelimit.IsRevoked(jti)
+		revoked, err := ratelimit.IsRevoked(r.Context(), jti)
 		if err != nil {
 			slog.Error("revocation check failed", "error", err, "request_id", requestID)
 			metrics.AuthFailures.WithLabelValues(metrics.RouteLabel(r.URL.Path), "revocation_unavailable").Inc()

@@ -148,6 +148,10 @@ REDIS_ADDR=127.0.0.1:6379
 
 ---
 
+## Redis operation limits
+
+Rate-limit, revocation, and readiness operations inherit request contexts and have a 500 ms deadline. Redis socket reads, writes, and dialing also have 500 ms limits; pool waits are limited to 100 ms. Automatic retries are disabled and the pool is capped at 32 connections. Cancellation propagates to Redis; an already-blocked socket operation remains bounded by its deadline. Store failures deny protected requests with 503. Startup checks Redis within the same deadline and shutdown closes the client.
+
 ## Resource limits
 
 The current safety defaults are fixed in code; configuration tuning is a follow-up change.
